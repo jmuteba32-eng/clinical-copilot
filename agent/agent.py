@@ -27,11 +27,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Final
 
 from anthropic import AsyncAnthropic
 from anthropic.types import Message
 
+from agent import observability
 from agent.openemr_client import OpenEMRClient
 from agent.schemas import SourcedRecord, ToolResult
 from agent.tools import TOOL_FUNCTIONS, TOOL_SPECS
@@ -182,13 +184,35 @@ class ClinicalCoPilot:
         final_text: str | None = None
 
         for _ in range(self._MAX_TOOL_ITERATIONS):
-            response = await self._anthropic.messages.create(
-                model=self._model,
-                max_tokens=self._MAX_TOKENS,
-                system=self._build_system_prompt(patient_id),
-                messages=messages,
-                tools=TOOL_SPECS,
-            )
+            # Traced as a Langfuse generation span (observability.py) --
+            # never with the actual prompt/response text as input/output,
+            # only token counts/cost/stop_reason: `messages` and `system`
+            # carry the physician's question and, once tools have run,
+            # patient chart data pulled straight from OpenEMR. See
+            # observability.py's module docstring for why that boundary is
+            # structural (an allowlist), not a discipline applied here.
+            with observability.trace_llm_call(model=self._model) as llm_span:
+                response = await self._anthropic.messages.create(
+                    model=self._model,
+                    max_tokens=self._MAX_TOKENS,
+                    system=self._build_system_prompt(patient_id),
+                    messages=messages,
+                    tools=TOOL_SPECS,
+                )
+                usage = getattr(response, "usage", None)
+                input_tokens = getattr(usage, "input_tokens", None) if usage is not None else None
+                output_tokens = getattr(usage, "output_tokens", None) if usage is not None else None
+                usage_details, cost_details = observability.llm_usage_and_cost(
+                    model=self._model, input_tokens=input_tokens, output_tokens=output_tokens
+                )
+                llm_span.update(
+                    output={
+                        "stop_reason": response.stop_reason,
+                        "tool_call_count": sum(1 for block in response.content if block.type == "tool_use"),
+                    },
+                    usage_details=usage_details,
+                    cost_details=cost_details,
+                )
             # The SDK's response content blocks serialize correctly when
             # fed straight back into the next request's `messages` -- no
             # need to hand-roll a dict form of the assistant turn.
@@ -277,16 +301,32 @@ class ClinicalCoPilot:
                 trusted_patient_id,
             )
 
-        try:
-            return await tool_fn(self._openemr, trusted_patient_id)
-        except Exception:
-            # Tools are contracted (see tools.py) to catch their own
-            # OpenEMR/parsing failures and return a populated
-            # ToolResult.error rather than raising. This is a last-resort
-            # safety net for a genuinely unexpected bug in a tool, not the
-            # primary error-handling path -- so it's logged loudly.
-            logger.exception("Tool '%s' raised unexpectedly instead of returning a ToolResult", block.name)
-            return ToolResult(records=[], missing=False, error=f"Tool '{block.name}' failed unexpectedly.")
+        start = time.monotonic()
+        # Traced as a span (observability.py) with only the outcome shape
+        # -- missing/has_error/record_count -- never `result.records`
+        # itself, which is exactly the patient chart data this tool call
+        # just retrieved.
+        with observability.trace_tool_call(tool_name=block.name) as tool_span:
+            try:
+                result = await tool_fn(self._openemr, trusted_patient_id)
+            except Exception:
+                # Tools are contracted (see tools.py) to catch their own
+                # OpenEMR/parsing failures and return a populated
+                # ToolResult.error rather than raising. This is a last-resort
+                # safety net for a genuinely unexpected bug in a tool, not the
+                # primary error-handling path -- so it's logged loudly.
+                logger.exception("Tool '%s' raised unexpectedly instead of returning a ToolResult", block.name)
+                result = ToolResult(records=[], missing=False, error=f"Tool '{block.name}' failed unexpectedly.")
+
+            tool_span.update(
+                output={
+                    "missing": result.missing,
+                    "has_error": result.error is not None,
+                    "record_count": len(result.records),
+                    "latency_ms": round((time.monotonic() - start) * 1000, 2),
+                }
+            )
+        return result
 
 
 def _extract_final_text(response: Message) -> str:

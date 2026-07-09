@@ -44,8 +44,10 @@ from pydantic import BaseModel, Field
 # grows.
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
+from agent import observability  # noqa: E402
 from agent.agent import ClinicalCoPilot  # noqa: E402
 from agent.openemr_client import OpenEMRClient, OpenEMRClientError  # noqa: E402
+from agent.verification import VerificationResult, verify  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -185,12 +187,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    observability.configure()
     async with OpenEMRClient() as openemr_client:
         copilot = ClinicalCoPilot(openemr_client)
         app.state.openemr_client = openemr_client
         app.state.copilot = copilot
-        logger.info("app_startup", extra={"event": "app_startup"})
+        logger.info("app_startup", extra={"event": "app_startup", "langfuse_enabled": observability.enabled()})
         yield
+    observability.shutdown()
     logger.info("app_shutdown", extra={"event": "app_shutdown"})
 
 
@@ -332,6 +336,7 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     answer: str
     tool_calls: list[dict[str, Any]]
+    verification: VerificationResult
     correlation_id: str
 
 
@@ -406,23 +411,79 @@ async def ask(request: Request, payload: AskRequest, copilot: ClinicalCoPilot = 
         },
     )
 
-    start = time.monotonic()
-    result = await copilot.answer(payload.patient_id, payload.question)
-    latency_ms = round((time.monotonic() - start) * 1000, 2)
+    # One Langfuse trace per request (observability.py), joined to this
+    # request's correlation_id (see trace_ask_request's docstring). Every
+    # LLM-call/tool-call span `copilot.answer()` opens below nests under
+    # this trace automatically via OpenTelemetry context propagation --
+    # that only holds as long as `answer()` runs INSIDE this `with` block,
+    # on this same asyncio task (same condition the correlation_id
+    # ContextVar above already depends on).
+    with observability.trace_ask_request(
+        correlation_id=correlation_id, patient_id=payload.patient_id, question_length=len(payload.question)
+    ) as trace:
+        start = time.monotonic()
+        result = await copilot.answer(payload.patient_id, payload.question)
+        latency_ms = round((time.monotonic() - start) * 1000, 2)
 
-    logger.info(
-        "ask_request_completed",
-        extra={
-            "event": "ask_request_completed",
-            "patient_id": payload.patient_id,
-            "tool_call_count": len(result["tool_calls"]),
-            "record_count": len(result["records"]),
-            "latency_ms": latency_ms,
-            "correlation_id": correlation_id,
-        },
+        logger.info(
+            "ask_request_completed",
+            extra={
+                "event": "ask_request_completed",
+                "patient_id": payload.patient_id,
+                "tool_call_count": len(result["tool_calls"]),
+                "record_count": len(result["records"]),
+                "latency_ms": latency_ms,
+                "correlation_id": correlation_id,
+            },
+        )
+
+        # Runs AFTER the agent produces its answer and BEFORE anything is
+        # returned to the client -- see verification.py's module docstring
+        # for why this has to be a separate, deterministic pass rather than
+        # the agent trusting its own citations. Never skipped, never
+        # short-circuited by a `passed` check here: a failed verification
+        # still gets returned (this endpoint's job is to surface the
+        # failure structurally, per requirement 4, not to swallow the
+        # answer or turn it into a 5xx).
+        with observability.trace_verification() as verification_span:
+            verification_result = verify(result["answer"], result["records"])
+            verification_fields = {
+                "passed": verification_result.passed,
+                "hallucinated_source_count": len(verification_result.hallucinated_sources),
+                "uncited_claim_count": len(verification_result.uncited_claims),
+                "boundary_violation_count": len(verification_result.boundary_violations),
+                "boundary_violations": verification_result.boundary_violations,
+                "checked_claims": verification_result.checked_claims,
+            }
+            verification_span.update(output=verification_fields)
+
+        log_fn = logger.info if verification_result.passed else logger.warning
+        log_fn(
+            "verification_completed",
+            extra={
+                "event": "verification_completed",
+                "patient_id": payload.patient_id,
+                "correlation_id": correlation_id,
+                **verification_fields,
+            },
+        )
+
+        # Requirement 5: a boolean score on the trace itself (not just the
+        # verification span) so hallucination rate can be charted directly
+        # from Langfuse's trace-level scores over time, without having to
+        # drill into each trace's child spans first.
+        trace.score_trace(name="verification_passed", value=1 if verification_result.passed else 0, data_type="BOOLEAN")
+        # Requirement 2's trace "output" is deliberately a redacted summary,
+        # never `result["answer"]` itself -- that string IS the synthesized
+        # clinical content this whole module exists to keep out of Langfuse.
+        trace.update(output={"answer_length": len(result["answer"]), "verification": verification_fields})
+
+    return AskResponse(
+        answer=result["answer"],
+        tool_calls=result["tool_calls"],
+        verification=verification_result,
+        correlation_id=correlation_id,
     )
-
-    return AskResponse(answer=result["answer"], tool_calls=result["tool_calls"], correlation_id=correlation_id)
 
 
 # --------------------------------------------------------------------------
