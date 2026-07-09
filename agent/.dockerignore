@@ -1,0 +1,13 @@
+# Never bake secrets or a huge local venv into an image layer.
+venv/
+.env
+.env.*
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+.git
+.gitignore
+Dockerfile
+.dockerignore

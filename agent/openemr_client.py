@@ -269,6 +269,18 @@ class OpenEMRClient:
     # Public API
     # ----------------------------------------------------------------
 
+    async def ensure_authenticated(self) -> None:
+        """Confirm OpenEMR credentials work, without fetching any FHIR data.
+
+        Exists for readiness probes (e.g. a `/ready` endpoint) that need to
+        answer "can we authenticate to OpenEMR?" as a question distinct from
+        "can we read a specific FHIR resource?" -- the latter also depends
+        on scope/ACL grants for that resource, which is a different failure
+        mode than credentials being wrong or the token endpoint being down.
+        Raises the same typed exceptions as `get_fhir` on failure.
+        """
+        await self._get_valid_access_token()
+
     async def get_fhir(self, resource: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Fetch a FHIR resource or search result.
 
