@@ -21,6 +21,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
@@ -29,13 +30,22 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from agent.agent import ClinicalCoPilot
-from agent.openemr_client import OpenEMRClient, OpenEMRClientError
-
 # Loads agent/.env for local development if present; a no-op in production
 # (Railway, or any environment) where real variables are injected by the
-# platform. Must run before any module below reads env vars.
-load_dotenv()
+# platform. Resolved relative to this file, not the process's current
+# working directory: `uvicorn agent.main:app` is meant to be launched from
+# the repo root, so a bare `load_dotenv()` (which searches upward from the
+# CWD) would look in the repo root and never find `agent/.env`. Railway
+# runs from a different CWD than a local machine too, so anything
+# CWD-relative here would be fragile in exactly the same way. Runs before
+# the `agent.*` imports below -- not because either currently reads env
+# vars at import time (they don't, only inside functions/methods), but so
+# that stays true by construction rather than by accident as this file
+# grows.
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+from agent.agent import ClinicalCoPilot  # noqa: E402
+from agent.openemr_client import OpenEMRClient, OpenEMRClientError  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -346,6 +356,16 @@ async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_op
     a specific resource type" are different failure modes (the latter also
     depends on per-resource scope/ACL grants), and this endpoint is scoped
     to the former.
+
+    Uses `openemr_client.readiness_timeout_seconds` here rather than the
+    client's default (`OPENEMR_TIMEOUT_SECONDS`, which bounds a live tool
+    call during a physician's question): OpenEMR has no caching layer and
+    10-40+ queries go into assembling one patient's picture (per AUDIT.md),
+    and this deployment runs on Railway's free tier, which cold-starts
+    slowly. A readiness probe can afford to wait that out; a physician
+    waiting on an actual answer cannot -- which is exactly why this
+    project's architecture pre-computes summaries rather than synthesizing
+    everything live on every question.
     """
     failures: list[str] = []
 
@@ -353,7 +373,7 @@ async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_op
         failures.append("ANTHROPIC_API_KEY is not set")
 
     try:
-        await openemr_client.ensure_authenticated()
+        await openemr_client.ensure_authenticated(timeout_seconds=openemr_client.readiness_timeout_seconds)
     except OpenEMRClientError as exc:
         failures.append(f"OpenEMR authentication failed: {exc}")
 

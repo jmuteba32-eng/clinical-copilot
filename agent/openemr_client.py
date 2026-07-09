@@ -148,15 +148,30 @@ class OpenEMRConfig:
     client_secret: str
     username: str
     password: str
+    # Not one of the five *required* variables below -- this has a default
+    # because a deployment shouldn't fail to start over a timeout tuning
+    # value the way it should over missing credentials. Default of 30s (not
+    # httpx's usual 5s) reflects a real, observed latency characteristic of
+    # this project's OpenEMR deployment: AUDIT.md documents no caching layer
+    # and 10-40+ queries to assemble one patient's picture, and this
+    # instance runs on Railway's free tier, which is genuinely slow
+    # (idles/cold-starts between requests). That is exactly why this
+    # project's architecture pre-computes summaries rather than having the
+    # agent synthesize everything live on every question -- but the client
+    # still has to survive talking to a slow, un-cached backend either way.
+    timeout_seconds: float = 30.0
 
     @classmethod
     def from_env(cls) -> OpenEMRConfig:
         """Build config from OPENEMR_* environment variables.
 
-        Validates all five variables up front and reports every missing one
-        in a single error, rather than failing on the first ``KeyError`` --
-        a deployment with three missing variables should not require three
-        separate failed-startup-and-fix cycles to diagnose.
+        Validates the five required variables up front and reports every
+        missing one in a single error, rather than failing on the first
+        ``KeyError`` -- a deployment with three missing variables should
+        not require three separate failed-startup-and-fix cycles to
+        diagnose. ``OPENEMR_TIMEOUT_SECONDS`` is optional and validated
+        separately since a bad number there is a misconfiguration, not a
+        missing-credential problem.
         """
         env_to_field = {
             "OPENEMR_BASE_URL": "base_url",
@@ -181,12 +196,25 @@ class OpenEMRConfig:
                 "before this client is constructed) before starting the agent."
             )
 
+        timeout_seconds = cls.__dataclass_fields__["timeout_seconds"].default
+        raw_timeout = os.environ.get("OPENEMR_TIMEOUT_SECONDS")
+        if raw_timeout:
+            try:
+                timeout_seconds = float(raw_timeout)
+            except ValueError as exc:
+                raise OpenEMRConfigError(
+                    f"OPENEMR_TIMEOUT_SECONDS must be a number, got {raw_timeout!r}."
+                ) from exc
+            if timeout_seconds <= 0:
+                raise OpenEMRConfigError(f"OPENEMR_TIMEOUT_SECONDS must be positive, got {timeout_seconds}.")
+
         return cls(
             base_url=values["base_url"].rstrip("/"),
             client_id=values["client_id"],
             client_secret=values["client_secret"],
             username=values["username"],
             password=values["password"],
+            timeout_seconds=timeout_seconds,
         )
 
 
@@ -207,7 +235,13 @@ class OpenEMRClient:
 
     _TOKEN_PATH: Final[str] = "/oauth2/default/token"
     _FHIR_PATH_TEMPLATE: Final[str] = "/apis/default/fhir/{resource}"
-    _TIMEOUT_SECONDS: Final[float] = 10.0
+    # Readiness (`/ready`) deliberately tolerates a longer wait than a live
+    # tool call: a physician's question needs an answer in seconds, but a
+    # readiness probe can afford to wait out a cold Railway container --
+    # see `ensure_authenticated`'s `timeout_seconds` parameter and
+    # `main.py`'s `/ready` handler, which passes this multiplier's worth of
+    # patience explicitly rather than reusing `config.timeout_seconds`.
+    _READINESS_TIMEOUT_MULTIPLIER: Final[float] = 2.0
     # Refresh a little before actual expiry so a token that is valid at the
     # moment we check it doesn't expire mid-flight while the FHIR request is
     # still in transit.
@@ -241,7 +275,7 @@ class OpenEMRClient:
         the network at all.
         """
         self._config = config or OpenEMRConfig.from_env()
-        self._http = http_client or httpx.AsyncClient(timeout=httpx.Timeout(self._TIMEOUT_SECONDS))
+        self._http = http_client or httpx.AsyncClient(timeout=httpx.Timeout(self._config.timeout_seconds))
         # Only close a client we created ourselves -- closing one the
         # caller injected would be a surprising side effect on their object.
         self._owns_http_client = http_client is None
@@ -265,11 +299,26 @@ class OpenEMRClient:
         if self._owns_http_client:
             await self._http.aclose()
 
+    @property
+    def readiness_timeout_seconds(self) -> float:
+        """How long `ensure_authenticated` should wait when called from `/ready`.
+
+        Deliberately longer than `config.timeout_seconds` (the budget for a
+        live tool call during a physician's question): a readiness probe
+        can afford to sit out a cold start on OpenEMR's Railway free-tier
+        deployment, which AUDIT.md documents as having no caching layer and
+        10-40+ queries to assemble one patient's picture -- exactly why this
+        project's architecture pre-computes summaries rather than having
+        the agent synthesize everything live on every question. A physician
+        waiting on an actual answer cannot afford that same patience.
+        """
+        return self._config.timeout_seconds * self._READINESS_TIMEOUT_MULTIPLIER
+
     # ----------------------------------------------------------------
     # Public API
     # ----------------------------------------------------------------
 
-    async def ensure_authenticated(self) -> None:
+    async def ensure_authenticated(self, *, timeout_seconds: float | None = None) -> None:
         """Confirm OpenEMR credentials work, without fetching any FHIR data.
 
         Exists for readiness probes (e.g. a `/ready` endpoint) that need to
@@ -278,8 +327,13 @@ class OpenEMRClient:
         on scope/ACL grants for that resource, which is a different failure
         mode than credentials being wrong or the token endpoint being down.
         Raises the same typed exceptions as `get_fhir` on failure.
+
+        ``timeout_seconds``, if given, overrides `config.timeout_seconds`
+        for this call only (see `readiness_timeout_seconds`) -- it does NOT
+        change the timeout used by `get_fhir` or any other call sharing this
+        client instance.
         """
-        await self._get_valid_access_token()
+        await self._get_valid_access_token(timeout_seconds=timeout_seconds)
 
     async def get_fhir(self, resource: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         """Fetch a FHIR resource or search result.
@@ -307,7 +361,9 @@ class OpenEMRClient:
         try:
             response = await self._http.get(url, params=params, headers=headers)
         except httpx.TimeoutException as exc:
-            raise OpenEMRConnectionError(f"Timed out fetching '{resource}' from OpenEMR after {self._TIMEOUT_SECONDS}s.") from exc
+            raise OpenEMRConnectionError(
+                f"Timed out fetching '{resource}' from OpenEMR after {self._config.timeout_seconds}s."
+            ) from exc
         except httpx.RequestError as exc:
             raise OpenEMRConnectionError(f"Network error fetching '{resource}' from OpenEMR: {exc!r}") from exc
 
@@ -336,22 +392,28 @@ class OpenEMRClient:
     # Token management
     # ----------------------------------------------------------------
 
-    async def _get_valid_access_token(self) -> str:
-        """Return a token known to be valid, authenticating/refreshing first if needed."""
+    async def _get_valid_access_token(self, *, timeout_seconds: float | None = None) -> str:
+        """Return a token known to be valid, authenticating/refreshing first if needed.
+
+        ``timeout_seconds`` overrides `config.timeout_seconds` for the
+        network call this triggers, if one is needed at all -- a cached,
+        still-valid token short-circuits before any network call happens,
+        regardless of what's passed here.
+        """
         async with self._token_lock:
             if self._access_token is None or self._is_token_expired():
                 if self._refresh_token is not None:
                     try:
-                        await self._refresh()
+                        await self._refresh(timeout_seconds=timeout_seconds)
                     except OpenEMRAuthError:
                         # Refresh token itself may have expired/been revoked
                         # (offline_access refresh tokens outlive access
                         # tokens but are not immortal) -- fall back to a
                         # full password re-authentication rather than
                         # propagating a refresh-specific failure.
-                        await self._authenticate()
+                        await self._authenticate(timeout_seconds=timeout_seconds)
                 else:
-                    await self._authenticate()
+                    await self._authenticate(timeout_seconds=timeout_seconds)
 
             if self._access_token is None:
                 # Unreachable in practice -- _authenticate/_refresh always
@@ -365,7 +427,7 @@ class OpenEMRClient:
             return True
         return datetime.now(timezone.utc) >= (self._token_expires_at - self._EXPIRY_BUFFER)
 
-    async def _authenticate(self) -> None:
+    async def _authenticate(self, *, timeout_seconds: float | None = None) -> None:
         """Full OAuth2 password-grant login using the resource owner's credentials."""
         payload = {
             "grant_type": "password",
@@ -376,10 +438,10 @@ class OpenEMRClient:
             "username": self._config.username,
             "password": self._config.password,
         }
-        token_data = await self._request_token(payload)
+        token_data = await self._request_token(payload, timeout_seconds=timeout_seconds)
         self._store_token(token_data)
 
-    async def _refresh(self) -> None:
+    async def _refresh(self, *, timeout_seconds: float | None = None) -> None:
         """Renew the access token using the cached refresh token.
 
         Preferred over :meth:`_authenticate` for routine renewal because it
@@ -395,23 +457,53 @@ class OpenEMRClient:
             "refresh_token": self._refresh_token,
             "scope": self.SCOPE,
         }
-        token_data = await self._request_token(payload)
+        token_data = await self._request_token(payload, timeout_seconds=timeout_seconds)
         self._store_token(token_data)
 
-    async def _request_token(self, payload: dict[str, str]) -> dict[str, Any]:
+    async def _request_token(self, payload: dict[str, str], *, timeout_seconds: float | None = None) -> dict[str, Any]:
         url = f"{self._config.base_url}{self._TOKEN_PATH}"
+        # httpx treats an explicit `timeout=` kwarg (even `None`) as "use
+        # this instead of the client's default" -- so the override is only
+        # passed at all when the caller actually asked for one; omitting it
+        # entirely is how a per-request call falls back to the client's
+        # configured default (`config.timeout_seconds`).
+        request_kwargs: dict[str, Any] = {}
+        if timeout_seconds is not None:
+            request_kwargs["timeout"] = httpx.Timeout(timeout_seconds)
+        effective_timeout = timeout_seconds if timeout_seconds is not None else self._config.timeout_seconds
+
         try:
-            response = await self._http.post(url, data=payload)
+            response = await self._http.post(url, data=payload, **request_kwargs)
         except httpx.TimeoutException as exc:
-            raise OpenEMRConnectionError(f"Timed out contacting OpenEMR's token endpoint after {self._TIMEOUT_SECONDS}s.") from exc
+            raise OpenEMRConnectionError(f"Timed out contacting OpenEMR's token endpoint after {effective_timeout}s.") from exc
         except httpx.RequestError as exc:
             raise OpenEMRConnectionError(f"Network error contacting OpenEMR's token endpoint: {exc!r}") from exc
 
         if response.status_code >= 400:
-            # Deliberately not including the response body in the message:
-            # OAuth2 error bodies are usually just {"error": "invalid_grant"}
-            # but must not be assumed PHI-free by this generic path -- log
-            # or display only the status code to any downstream consumer.
+            # TEMPORARY DEBUG LOGGING -- remove or downgrade to DEBUG once the
+            # current 401-on-password-grant investigation is resolved.
+            #
+            # Deliberately logs the RESPONSE body, never the request body:
+            # `payload` (this method's request) carries the resource owner's
+            # username/password/client_secret in the clear, but OpenEMR's
+            # OAuth2 error responses are just RFC 6749 error objects (e.g.
+            # `{"error": "invalid_client", "message": "Client authentication
+            # failed", "hint": "..."}` -- see league/oauth2-server 8.5.5's
+            # `OAuthServerException`, pinned in composer.lock, which backs
+            # `AuthorizationController::oauthAuthorizeToken()`). No PHI, no
+            # credentials, no patient data crosses this line.
+            logger.error(
+                "OpenEMR token request rejected",
+                extra={
+                    "grant_type": payload["grant_type"],
+                    "status_code": response.status_code,
+                    "response_body": response.text,
+                },
+            )
+            # Deliberately not including the response body in the exception
+            # message: it must not be assumed PHI-free by this generic path
+            # once it reaches a caller/HTTP client -- display only the
+            # status code there. The body above is for server-side logs only.
             raise OpenEMRAuthError(
                 f"OpenEMR rejected the '{payload['grant_type']}' grant (HTTP {response.status_code}). "
                 "Check client credentials, resource-owner credentials, and requested scope.",
