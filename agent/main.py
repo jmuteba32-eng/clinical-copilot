@@ -354,6 +354,20 @@ _PATIENT_NOT_FOUND_MESSAGE = "No patient with that identifier exists."
 # --------------------------------------------------------------------------
 
 
+@app.get("/")
+async def index() -> dict[str, str | dict[str, str]]:
+    """Static service index — no OpenEMR, Anthropic, or Langfuse calls."""
+    return {
+        "service": "Clinical Co-Pilot Agent",
+        "status": "running",
+        "endpoints": {
+            "GET /health": "liveness",
+            "GET /ready": "readiness — checks OpenEMR auth + Anthropic key",
+            "POST /ask": "body: {patient_id, question}",
+        },
+    }
+
+
 @app.get("/health")
 async def health() -> dict[str, str]:
     """Liveness: is the process alive? No dependency checks -- see explanation."""
