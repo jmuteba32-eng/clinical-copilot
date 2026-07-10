@@ -90,6 +90,11 @@ _ALLOWED_METADATA_KEYS: Final[frozenset[str]] = frozenset(
         "has_error",
         "record_count",
         "latency_ms",
+        # Patient existence gate (tools.py's `patient_exists`, run from
+        # main.py before the agent runs at all) -- a bare boolean, never
+        # the patient_id-adjacent detail of *why* (that stays in `error`
+        # strings, which are not on this allowlist).
+        "patient_found",
         # Verification step fields -- all counts/booleans, plus the
         # boundary-violation phrases themselves, which are safe because
         # they are drawn from `verification.py`'s own fixed, small,
@@ -361,6 +366,16 @@ def trace_tool_call(*, tool_name: str) -> AbstractContextManager[_SafeObservatio
 def trace_verification() -> AbstractContextManager[_SafeObservation]:
     """One span for the `verify()` call in `main.py`'s /ask handler."""
     return _observe(as_type="span", name="verification")
+
+
+def trace_patient_existence_check() -> AbstractContextManager[_SafeObservation]:
+    """One span for `tools.py`'s `patient_exists()` call in `main.py`'s /ask handler.
+
+    Runs before, and is a sibling of, the LLM-call/tool-call spans nested
+    under the same request trace -- not a child of any of them, since it
+    happens before the agent is invoked at all (see `main.py`).
+    """
+    return _observe(as_type="span", name="patient_existence_check")
 
 
 def llm_usage_and_cost(*, model: str, input_tokens: Optional[int], output_tokens: Optional[int]) -> tuple[Optional[dict[str, int]], Optional[dict[str, float]]]:

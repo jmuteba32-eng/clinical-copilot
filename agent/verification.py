@@ -91,22 +91,36 @@ _SENTENCE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"(?<=[.!?])\s+")
 
 # Phrasings the system prompt's own rules instruct Claude to use for the
 # cases where NOT citing is correct, not a gap: rule 3 (missing data), rule
-# 4 (tool error), rule 6 (declining to diagnose/prescribe/dose/judge), and
-# the agent's own max-iteration/truncation fallback text (agent.py's
-# `_extract_final_text` and the iteration-cap message in `answer()`).
-# Matched loosely (substrings of the actual fixed phrasing) since Claude
-# paraphrases rather than repeating the rule text verbatim -- this is
-# necessarily a heuristic allowlist, not a guarantee every legitimately
-# uncited sentence matches one of these patterns (see `_is_permitted_uncited`).
+# 4 (tool error), rule 6 (declining to diagnose/prescribe/dose/judge), rule
+# 8 (general background, not a claim about this patient), and the agent's
+# own max-iteration/truncation fallback text (agent.py's `_extract_final_text`
+# and the iteration-cap message in `answer()`). Matched loosely (substrings
+# of the actual fixed phrasing) since Claude paraphrases rather than
+# repeating the rule text verbatim -- this is necessarily a heuristic
+# allowlist, not a guarantee every legitimately uncited sentence matches one
+# of these patterns (see `_is_permitted_uncited`).
 _PERMITTED_UNCITED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
     re.compile(pattern, re.IGNORECASE)
     for pattern in (
         r"on file for this patient",
         r"does not exist for this patient",
-        r"no .{0,40} (are|is|were|was) (on file|recorded|documented)",
+        # Broad on purpose (no required verb between "no" and "on file"/
+        # "recorded"/"documented"): a live run surfaced "show no records on
+        # file" for missing data, which the earlier, verb-anchored version
+        # of this pattern did not match. HONEST LIMITATION (see module
+        # docstring): loosening this trades in the other direction -- a
+        # sentence that happens to contain "no" and one of these words for
+        # unrelated reasons within 60 characters would now be wrongly
+        # exempted from the citation check instead of flagged. Accepted
+        # rather than continuing to special-case every new grammatical
+        # variant Claude produces for the same underlying, legitimate
+        # rule-3 fact; a real over-exemption here would still have to
+        # coincidentally read like an absence statement to slip through.
+        r"no .{0,60}(on file|recorded|documented)",
         r"could not retrieve",
         r"retrieval failed",
         r"unable to retrieve",
+        r"(cannot|unable to|can'?t) provide",
         r"physician'?s decision",
         r"physician (makes|decides|should decide)",
         r"is (a decision for|up to) (the )?physician",
@@ -114,6 +128,16 @@ _PERMITTED_UNCITED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
         r"try a narrower or simpler question",
         r"this response was truncated",
         r"cannot (diagnose|prescribe|recommend a dose|judge)",
+        # Rule 8's exact required prefix for general (non-chart-specific)
+        # background -- e.g. "General context: H04.123 typically refers to
+        # a lacrimal condition." A sentence starting with this literal
+        # marker is, by construction, not a claim about this patient (see
+        # agent.py's rule 8), so it is exempt from the citation requirement
+        # rather than flagged as an uncited claim. This is a fixed prefix,
+        # not a paraphrase-tolerant pattern like the others above, on
+        # purpose: rule 8 requires Claude to use this exact wording
+        # specifically so this check can match it exactly, not guess.
+        r"^general context:",
     )
 )
 

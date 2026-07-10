@@ -292,18 +292,38 @@ class ToolResult(BaseModel, Generic[T]):
     alias at the call site, instead of a hand-written DiagnosisToolResult,
     MedicationToolResult, etc. that would drift out of sync as fields change.
 
-    missing and error are intentionally both present and independent:
-    - missing=True, error=None: the tool ran fine; the patient genuinely has
-      no records of this type. Reportable to the physician as a real gap.
-    - missing=False, error="...": the tool could not complete (auth
-      failure, network error, malformed FHIR response); records is
-      necessarily empty, but this is NOT the same fact as "no data exists"
-      and must not be phrased that way to the physician.
-    - missing=True and error both set is intentionally not forbidden by the
-      type: a partial failure (e.g. one of several FHIR calls in the tool
-      failed) can legitimately report zero records alongside an error
-      describing what did not load, so the physician sees a gap AND the
-      reason for it.
+    missing and error are intentionally both present and independent, and
+    together describe THREE distinct states a physician needs told apart:
+
+    (a) records non-empty: the tool ran fine and found data. The normal,
+        happy-path case.
+    (b) missing=True, error=None: the tool ran fine; the patient genuinely
+        has no records of this type. Reportable to the physician as a real
+        gap -- BUT ONLY trustworthy as that fact once something else has
+        independently confirmed the patient itself exists. OpenEMR's FHIR
+        search endpoints (which every tool in tools.py calls -- see
+        get_intake's docstring for why even the "single patient" tool
+        searches rather than reads directly) return HTTP 200 with an empty
+        Bundle for BOTH "no patient with this id" and "patient exists but
+        has zero records of this type". Those are NOT the same clinical
+        fact, and a `ToolResult` alone cannot tell them apart: a
+        nonexistent patient_id produces `missing=True` from all four tools
+        that looks identical to a real, if sparse, chart. `tools.py`'s
+        `patient_exists()` is the caller's job to run FIRST (see
+        `main.py`'s /ask handler) specifically so that by the time any
+        tool's `missing=True` is trusted and reported to a physician as
+        "no diagnoses/meds/labs/demographics on file", patient existence is
+        already a confirmed fact, not an assumption.
+    (c) missing=False, error="...": the tool could not complete (auth
+        failure, network error, malformed FHIR response); records is
+        necessarily empty, but this is NOT the same fact as "no data
+        exists" and must not be phrased that way to the physician.
+
+    missing=True and error both set is intentionally not forbidden by the
+    type: a partial failure (e.g. one of several FHIR calls in the tool
+    failed) can legitimately report zero records alongside an error
+    describing what did not load, so the physician sees a gap AND the
+    reason for it.
     """
 
     records: list[T] = Field(

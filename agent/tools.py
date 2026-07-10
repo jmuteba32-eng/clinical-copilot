@@ -247,7 +247,22 @@ def _parse_condition(resource: dict[str, Any]) -> DiagnosisRecord | None:
     code_concept = resource.get("code")
     code, display = _code_and_display(code_concept) if isinstance(code_concept, dict) else (None, None)
     if display is None:
-        return None  # DiagnosisRecord.display is required; nothing usable to show.
+        # Confirmed against this project's live OpenEMR instance: real
+        # Condition resources here carry a populated ICD-10 `coding.code`
+        # (e.g. "H04.123") but an EMPTY `coding.display` string and no
+        # concept-level `.text` -- `_code_and_display` correctly treats an
+        # empty string as absent, so `display` legitimately comes back
+        # None even though the record is far from unusable. A bare code is
+        # still clinically meaningful (any clinician recognizes an ICD-10
+        # code on sight, and the agent's LLM can reason about what it
+        # means) -- falling back to it here matches this field's own
+        # docstring in schemas.py ("required because a diagnosis record
+        # with NEITHER a code NOR a display name carries no clinical
+        # meaning"), which was already the intent; only the code below had
+        # drifted to checking display alone.
+        display = code
+    if display is None:
+        return None  # Neither a code nor a display/text -- nothing usable to show.
 
     status_concept = resource.get("clinicalStatus")
     clinical_status = _first_coding_code(status_concept) if isinstance(status_concept, dict) else None
@@ -445,6 +460,51 @@ def _parse_diagnostic_report(resource: dict[str, Any]) -> TestingRecord | None:
 
 
 # --------------------------------------------------------------------------
+# Patient existence gate -- NOT one of the four agent tools
+# --------------------------------------------------------------------------
+#
+# Deliberately kept out of TOOL_SPECS at the bottom of this file: this is
+# not something Claude decides to call. `main.py`'s /ask handler calls it
+# directly, before the agent runs at all, because none of the four tools
+# below can safely infer patient existence from their own result -- see
+# `ToolResult`'s docstring in schemas.py for the full three-state
+# (found / confirmed-missing / errored) contract this makes possible, and
+# get_intake's docstring for why every tool here searches rather than reads
+# a resource directly.
+
+
+async def patient_exists(client: OpenEMRClient, patient_id: str) -> bool:
+    """Confirm a patient exists before any tool's `missing=True` can be trusted.
+
+    WHY this has to be a separate, explicit check rather than something a
+    tool infers from an empty result: OpenEMR's FHIR search endpoints --
+    which is every endpoint this codebase calls -- respond HTTP 200 with an
+    empty Bundle for BOTH "no patient with this id" and "patient exists but
+    has zero records of this type" (confirmed by reading
+    `src/RestControllers/FHIR/FhirPatientRestController.php::getAll()`,
+    which always returns 200 regardless of whether the search matched
+    anything or was even well-formed). Those are different clinical facts.
+    A `ToolResult(missing=True)` from get_diagnosis, get_treatment, and
+    get_testing, plus an empty get_intake, all together look EXACTLY like a
+    real patient with an unusually sparse chart -- when the actual fact
+    could be "this patient_id does not exist and none of the four tools
+    ever read a real chart at all". Trusting the empty results without
+    confirming existence first produces false confidence about a chart
+    that was never read.
+
+    Raises the same typed `OpenEMRClientError` subclasses `get_fhir` raises
+    on an actual failure to reach OpenEMR (auth denied, network/timeout,
+    unexpected server error). Deliberately does NOT catch and collapse
+    those into a `False` return -- "OpenEMR is unreachable" and "this
+    patient does not exist" are different failures, and a caller (see
+    `main.py`) must be able to tell a transient outage apart from a bad
+    patient_id instead of reporting the former as the latter.
+    """
+    bundle = await client.get_fhir("Patient", params={"_id": patient_id})
+    return bool(_extract_bundle_resources(bundle))
+
+
+# --------------------------------------------------------------------------
 # Tools
 # --------------------------------------------------------------------------
 
@@ -455,19 +515,51 @@ async def get_intake(client: OpenEMRClient, patient_id: str) -> ToolResult[Intak
     Never returns name, address, phone, or SSN -- see `IntakeRecord` in
     schemas.py for why those fields don't exist on the model at all, not
     just why this tool omits them.
+
+    Deliberately searches (`GET /Patient?_id=<id>`) rather than reading the
+    resource directly (`GET /Patient/<id>`), for reasons that only became
+    clear by reading OpenEMR's own source rather than guessing from the
+    error:
+
+    - `id` on a FHIR Patient resource is OpenEMR's internal `uuid` column,
+      never the legacy integer `pid`
+      (`src/Services/FHIR/FhirPatientService.php::parseOpenEMRRecord`
+      sets it from `$dataRecord['uuid']`). Passing the integer `pid` -- or
+      any other non-UUID string -- to *either* form of the request fails
+      identically at the OpenEMR service layer: `FhirServiceBase::getOne()`
+      is implemented as nothing but `getAll(['_id' => $fhirResourceId])`,
+      so both go through the same UUID-format validation
+      (`src/Services/FHIR/FhirServiceBase.php`).
+    - What actually differs is the REST *controller* action wrapping that
+      shared service call. A direct read is handled by
+      `FhirPatientRestController::getOne()`, which uses
+      `RestControllerHelper::handleFhirProcessingResult()` -- and that
+      helper turns a validation failure (bad/non-UUID id) into a hard HTTP
+      400, and a well-formed-but-unmatched id into a 404. A search is
+      handled by `::getAll()`, which ignores validity entirely and always
+      wraps whatever data it has (zero or more records) in a 200 Bundle.
+      The other three tools in this file already search (`?patient=<id>`)
+      for exactly this reason, and never see a 400 for a bad id -- only an
+      empty Bundle, which this tool now also degrades to `missing=True`
+      for, consistent with the rest of this file's missing-vs-error
+      contract, instead of surfacing an opaque `OpenEMRAPIError`.
     """
     try:
-        resource = await client.get_fhir(f"Patient/{patient_id}")
+        bundle = await client.get_fhir("Patient", params={"_id": patient_id})
     except OpenEMRNotFoundError:
         return ToolResult[IntakeRecord](records=[], missing=True, error=None)
     except OpenEMRClientError as exc:
         return ToolResult[IntakeRecord](records=[], missing=False, error=str(exc))
 
-    record = _parse_patient(resource, patient_id)
+    resources = _extract_bundle_resources(bundle)
+    if not resources:
+        return ToolResult[IntakeRecord](records=[], missing=True, error=None)
+
+    record = _parse_patient(resources[0], patient_id)
     if record is None:
-        # Only reachable if the single Patient resource itself came back
-        # unusably malformed -- there is no "skip and continue" option for a
-        # direct single-resource read, so this is an error, not a gap.
+        # Reachable only if the single Patient resource in the bundle came
+        # back unusably malformed -- there is no "skip and continue" option
+        # when exactly one record is expected, so this is an error, not a gap.
         return ToolResult[IntakeRecord](
             records=[],
             missing=False,

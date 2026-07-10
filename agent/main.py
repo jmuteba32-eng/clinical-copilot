@@ -47,6 +47,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 from agent import observability  # noqa: E402
 from agent.agent import ClinicalCoPilot  # noqa: E402
 from agent.openemr_client import OpenEMRClient, OpenEMRClientError  # noqa: E402
+from agent.tools import patient_exists  # noqa: E402
 from agent.verification import VerificationResult, verify  # noqa: E402
 
 
@@ -340,6 +341,14 @@ class AskResponse(BaseModel):
     correlation_id: str
 
 
+# Returned by /ask's patient-existence gate below, verbatim -- a fixed
+# string (not model-generated) is deliberate: a physician should never see
+# a chart-summary-shaped answer for a patient_id that was never confirmed
+# to exist, and a fixed message can't accidentally drift into implying
+# otherwise the way a synthesized one might.
+_PATIENT_NOT_FOUND_MESSAGE = "No patient with that identifier exists."
+
+
 # --------------------------------------------------------------------------
 # Endpoints
 # --------------------------------------------------------------------------
@@ -393,7 +402,12 @@ async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_op
 
 
 @app.post("/ask", response_model=AskResponse)
-async def ask(request: Request, payload: AskRequest, copilot: ClinicalCoPilot = Depends(get_copilot)) -> AskResponse:
+async def ask(
+    request: Request,
+    payload: AskRequest,
+    copilot: ClinicalCoPilot = Depends(get_copilot),
+    openemr_client: OpenEMRClient = Depends(get_openemr_client),
+) -> AskResponse | JSONResponse:
     correlation_id = _correlation_id_for(request)
 
     # Logs WHAT was asked about (patient_id -- an opaque FHIR resource ID)
@@ -421,6 +435,74 @@ async def ask(request: Request, payload: AskRequest, copilot: ClinicalCoPilot = 
     with observability.trace_ask_request(
         correlation_id=correlation_id, patient_id=payload.patient_id, question_length=len(payload.question)
     ) as trace:
+        # Confirms the patient actually exists BEFORE running any of the
+        # four tools -- see `tools.py`'s `patient_exists()` docstring and
+        # `ToolResult`'s docstring in schemas.py for the full reasoning.
+        # Short version: OpenEMR's FHIR search endpoints return HTTP 200
+        # with an empty Bundle for BOTH "no patient with this id" and
+        # "patient exists, zero records of this type" -- indistinguishable
+        # from inside a single tool's result. Skipping this check would let
+        # a typo'd or stale patient_id sail through all four tools as
+        # `missing=True`, and the agent would report that as a normal, if
+        # sparse, chart summary -- false confidence about a chart that was
+        # never actually read, for a patient who may not exist at all.
+        with observability.trace_patient_existence_check() as existence_span:
+            try:
+                patient_found = await patient_exists(openemr_client, payload.patient_id)
+            except OpenEMRClientError as exc:
+                # OpenEMR being unreachable/denying auth is NOT the same
+                # fact as "this patient does not exist" -- collapsing the
+                # two would report a transient outage as a data-entry
+                # error. Logged with the full exception server-side only;
+                # `exc`'s message never crosses into the client response
+                # (same rule the rest of this file follows for every other
+                # OpenEMR failure).
+                existence_span.update(output={"patient_found": False})
+                logger.error(
+                    "patient_existence_check_failed",
+                    extra={
+                        "event": "patient_existence_check_failed",
+                        "patient_id": payload.patient_id,
+                        "correlation_id": correlation_id,
+                    },
+                    exc_info=True,
+                )
+                trace.update(output={"patient_existence_check": "failed"})
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "Could not verify the patient exists in OpenEMR. Please try again.",
+                        "correlation_id": correlation_id,
+                    },
+                )
+            existence_span.update(output={"patient_found": patient_found})
+
+        if not patient_found:
+            logger.info(
+                "patient_not_found",
+                extra={
+                    "event": "patient_not_found",
+                    "patient_id": payload.patient_id,
+                    "correlation_id": correlation_id,
+                },
+            )
+            # No clinical claims were made -- and none of the four tools
+            # ran -- so a trivial pass is the honest verification outcome
+            # here, not a skipped/omitted field. Scored the same as any
+            # other trace so a "patient not found" turn doesn't distort a
+            # hallucination-rate dashboard by counting as a failure.
+            trace.score_trace(name="verification_passed", value=1, data_type="BOOLEAN")
+            trace.update(output={"patient_found": False})
+            return JSONResponse(
+                status_code=404,
+                content=AskResponse(
+                    answer=_PATIENT_NOT_FOUND_MESSAGE,
+                    tool_calls=[],
+                    verification=VerificationResult(passed=True, checked_claims=0),
+                    correlation_id=correlation_id,
+                ).model_dump(mode="json"),
+            )
+
         start = time.monotonic()
         result = await copilot.answer(payload.patient_id, payload.question)
         latency_ms = round((time.monotonic() - start) * 1000, 2)
