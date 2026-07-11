@@ -27,7 +27,7 @@ from typing import Any
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 # Loads agent/.env for local development if present; a no-op in production
@@ -46,9 +46,12 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from agent import observability  # noqa: E402
 from agent.agent import ClinicalCoPilot  # noqa: E402
+from agent.cache import CachedPatientChart, PatientChartCache, fetch_patient_chart, refresh_chart_diagnosis  # noqa: E402
 from agent.openemr_client import OpenEMRClient, OpenEMRClientError  # noqa: E402
+from agent.list_patients import list_openemr_patients  # noqa: E402
 from agent.tools import patient_exists  # noqa: E402
-from agent.verification import VerificationResult, verify  # noqa: E402
+from agent.verification import VerificationResult, records_for_verification, verify  # noqa: E402
+from agent.session import OTHER_PATIENT_REFUSAL_MESSAGE, foreign_patient_uuids_in_text  # noqa: E402
 
 
 # --------------------------------------------------------------------------
@@ -175,6 +178,12 @@ _configure_logging()
 
 logger = logging.getLogger(__name__)
 
+_UI_HTML_PATH = Path(__file__).resolve().parent / "chat_ui.html"
+_UI_HTML = _UI_HTML_PATH.read_text(encoding="utf-8")
+
+# In-memory UI sessions (token -> username). Replaced when real auth lands.
+_ui_sessions: dict[str, str] = {}
+
 
 # --------------------------------------------------------------------------
 # App lifespan: one shared OpenEMRClient + ClinicalCoPilot per process
@@ -189,11 +198,20 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     observability.configure()
+    chart_cache = PatientChartCache.from_env()
     async with OpenEMRClient() as openemr_client:
         copilot = ClinicalCoPilot(openemr_client)
         app.state.openemr_client = openemr_client
         app.state.copilot = copilot
-        logger.info("app_startup", extra={"event": "app_startup", "langfuse_enabled": observability.enabled()})
+        app.state.chart_cache = chart_cache
+        logger.info(
+            "app_startup",
+            extra={
+                "event": "app_startup",
+                "langfuse_enabled": observability.enabled(),
+                "chart_cache_enabled": chart_cache is not None,
+            },
+        )
         yield
     observability.shutdown()
     logger.info("app_shutdown", extra={"event": "app_shutdown"})
@@ -341,6 +359,50 @@ class AskResponse(BaseModel):
     correlation_id: str
 
 
+class ChatTurn(BaseModel):
+    role: str = Field(..., pattern=r"^(user|assistant)$", description="Prior turn role in this session.")
+    content: str = Field(..., min_length=1, description="Prior turn text (published Q&A only, not tool blocks).")
+
+
+class ChatRequest(BaseModel):
+    patient_id: str = Field(..., min_length=1, description="The FHIR Patient resource ID — fixed for the whole session.")
+    message: str = Field(..., min_length=1, description="The physician's current message in this session.")
+    conversation_history: list[ChatTurn] = Field(
+        default_factory=list,
+        description="Prior user/assistant turns for this session, in order.",
+    )
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    verification: VerificationResult
+    correlation_id: str
+    updated_conversation_history: list[ChatTurn]
+
+
+class LoginRequest(BaseModel):
+    username: str = Field(..., min_length=1)
+    password: str = Field(..., min_length=1)
+
+
+class LoginResponse(BaseModel):
+    token: str
+    username: str
+
+
+class PatientSummary(BaseModel):
+    """Picker row for GET /patients — chart identification, not agent clinical output.
+
+    ``name`` is included so physicians can select the right chart. The agent's
+    ``get_intake`` tool deliberately omits name (minimum-necessary PHI for Q&A).
+    """
+
+    id: str
+    name: str | None = None
+    age: int | None = None
+    sex: str | None = None
+
+
 # Returned by /ask's patient-existence gate below, verbatim -- a fixed
 # string (not model-generated) is deliberate: a physician should never see
 # a chart-summary-shaped answer for a patient_id that was never confirmed
@@ -354,18 +416,69 @@ _PATIENT_NOT_FOUND_MESSAGE = "No patient with that identifier exists."
 # --------------------------------------------------------------------------
 
 
-@app.get("/")
-async def index() -> dict[str, str | dict[str, str]]:
-    """Static service index — no OpenEMR, Anthropic, or Langfuse calls."""
-    return {
-        "service": "Clinical Co-Pilot Agent",
-        "status": "running",
-        "endpoints": {
-            "GET /health": "liveness",
-            "GET /ready": "readiness — checks OpenEMR auth + Anthropic key",
-            "POST /ask": "body: {patient_id, question}",
-        },
-    }
+@app.get("/", response_class=HTMLResponse)
+async def index() -> HTMLResponse:
+    """Clinical chat UI — self-contained HTML, no build step."""
+    return HTMLResponse(content=_UI_HTML)
+
+
+@app.post("/login", response_model=LoginResponse)
+async def login(payload: LoginRequest) -> LoginResponse | JSONResponse:
+    """MVP physician login — accepts configured credentials, returns an in-memory session token."""
+    expected_user = os.environ.get("AGENT_UI_USERNAME", "admin")
+    expected_pass = os.environ.get("AGENT_UI_PASSWORD", "ClinicalCoPilot2026!")
+    if payload.username != expected_user or payload.password != expected_pass:
+        return JSONResponse(status_code=401, content={"error": "Invalid credentials."})
+    token = str(uuid.uuid4())
+    _ui_sessions[token] = payload.username
+    logger.info("ui_login", extra={"event": "ui_login", "username": payload.username})
+    return LoginResponse(token=token, username=payload.username)
+
+
+@app.get("/patients", response_model=list[PatientSummary])
+async def list_patients(request: Request) -> list[PatientSummary] | JSONResponse:
+    """Minimum-necessary patient list for the UI picker (id, age, sex only).
+
+    Uses the same code path as ``python -m agent.list_patients``: a fresh
+    ``OpenEMRClient`` context per request (not the lifespan singleton), so
+    auth + FHIR search behave identically to the working CLI utility.
+    """
+    correlation_id = _correlation_id_for(request)
+    try:
+        async with OpenEMRClient() as client:
+            rows = await list_openemr_patients(client)
+    except OpenEMRClientError as exc:
+        logger.error(
+            "patients_list_failed",
+            extra={
+                "event": "patients_list_failed",
+                "correlation_id": correlation_id,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+                "openemr_status_code": exc.status_code,
+            },
+            exc_info=True,
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Could not load patients from OpenEMR. Please try again."},
+        )
+    except Exception as exc:
+        logger.exception(
+            "patients_list_unexpected_error",
+            extra={
+                "event": "patients_list_unexpected_error",
+                "correlation_id": correlation_id,
+                "error_type": type(exc).__name__,
+                "error_message": str(exc),
+            },
+        )
+        return JSONResponse(
+            status_code=503,
+            content={"error": "Could not load patients from OpenEMR. Please try again."},
+        )
+
+    return [PatientSummary(id=row["id"], name=row["name"], age=row["age"], sex=row["sex"]) for row in rows]
 
 
 @app.get("/health")
@@ -518,7 +631,14 @@ async def ask(
             )
 
         start = time.monotonic()
-        result = await copilot.answer(payload.patient_id, payload.question)
+
+        session_chart = await _patient_session_chart(request, payload.patient_id, openemr_client, correlation_id)
+
+        result = await copilot.answer(
+            payload.patient_id,
+            payload.question,
+            prefetched_chart=session_chart,
+        )
         latency_ms = round((time.monotonic() - start) * 1000, 2)
 
         logger.info(
@@ -542,7 +662,8 @@ async def ask(
         # failure structurally, per requirement 4, not to swallow the
         # answer or turn it into a 5xx).
         with observability.trace_verification() as verification_span:
-            verification_result = verify(result["answer"], result["records"])
+            verification_known = records_for_verification(result["records"], session_chart)
+            verification_result = verify(result["answer"], verification_known)
             verification_fields = {
                 "passed": verification_result.passed,
                 "hallucinated_source_count": len(verification_result.hallucinated_sources),
@@ -579,6 +700,225 @@ async def ask(
         tool_calls=result["tool_calls"],
         verification=verification_result,
         correlation_id=correlation_id,
+    )
+
+
+def _updated_conversation_history(
+    prior: list[ChatTurn],
+    message: str,
+    answer: str,
+) -> list[ChatTurn]:
+    return [*prior, ChatTurn(role="user", content=message), ChatTurn(role="assistant", content=answer)]
+
+
+async def _patient_session_chart(
+    request: Request,
+    patient_id: str,
+    openemr_client: OpenEMRClient,
+    correlation_id: str,
+) -> CachedPatientChart:
+    """Assembled first-visit chart for prefetch and session-scoped verification.
+
+    Uses the encrypted cache when configured; otherwise fetches from OpenEMR
+    on each call. Diagnoses are always re-fetched from OpenEMR on every
+    session load (even on cache hit) so problem-list edits are not masked by
+    the chart cache TTL — see ``refresh_chart_diagnosis``.
+    """
+    chart_cache: PatientChartCache | None = request.app.state.chart_cache
+    if chart_cache is not None:
+        cached = await chart_cache.get(patient_id)
+        if cached is not None:
+            logger.info(
+                "cache_hit",
+                extra={"event": "cache_hit", "patient_id": patient_id, "correlation_id": correlation_id},
+            )
+            chart = await refresh_chart_diagnosis(openemr_client, patient_id, cached)
+            await chart_cache.put(patient_id, chart)
+            logger.info(
+                "diagnosis_cache_refresh",
+                extra={
+                    "event": "diagnosis_cache_refresh",
+                    "patient_id": patient_id,
+                    "correlation_id": correlation_id,
+                    "condition_count": len(chart.get_diagnosis.records),
+                    "condition_ids": [r.source_id for r in chart.get_diagnosis.records],
+                },
+            )
+            return chart
+
+        logger.info(
+            "cache_miss",
+            extra={"event": "cache_miss", "patient_id": patient_id, "correlation_id": correlation_id},
+        )
+        chart = await fetch_patient_chart(openemr_client, patient_id)
+        await chart_cache.put(patient_id, chart)
+        return chart
+
+    return await fetch_patient_chart(openemr_client, patient_id)
+
+
+@app.post("/chat", response_model=ChatResponse)
+async def chat(
+    request: Request,
+    payload: ChatRequest,
+    copilot: ClinicalCoPilot = Depends(get_copilot),
+    openemr_client: OpenEMRClient = Depends(get_openemr_client),
+) -> ChatResponse | JSONResponse:
+    correlation_id = _correlation_id_for(request)
+
+    logger.info(
+        "chat_request_received",
+        extra={
+            "event": "chat_request_received",
+            "patient_id": payload.patient_id,
+            "message_length": len(payload.message),
+            "history_turn_count": len(payload.conversation_history),
+            "correlation_id": correlation_id,
+        },
+    )
+
+    # Structural patient lock (pre-LLM): if the current message names another
+    # patient's UUID, refuse before any tools run. Tool dispatch is already
+    # hard-scoped to payload.patient_id (agent.py::_dispatch_tool_call); this
+    # gate stops the turn earlier when the physician (or an injection in the
+    # message) tries to pivot the conversation to a different chart.
+    foreign_ids = foreign_patient_uuids_in_text(payload.message, payload.patient_id)
+    if foreign_ids:
+        logger.info(
+            "chat_other_patient_refused",
+            extra={
+                "event": "chat_other_patient_refused",
+                "patient_id": payload.patient_id,
+                "foreign_patient_ids": foreign_ids,
+                "correlation_id": correlation_id,
+            },
+        )
+        return ChatResponse(
+            answer=OTHER_PATIENT_REFUSAL_MESSAGE,
+            verification=VerificationResult(passed=True, checked_claims=0),
+            correlation_id=correlation_id,
+            updated_conversation_history=_updated_conversation_history(
+                payload.conversation_history,
+                payload.message,
+                OTHER_PATIENT_REFUSAL_MESSAGE,
+            ),
+        )
+
+    history_dicts = [turn.model_dump() for turn in payload.conversation_history]
+
+    with observability.trace_ask_request(
+        correlation_id=correlation_id,
+        patient_id=payload.patient_id,
+        question_length=len(payload.message),
+    ) as trace:
+        with observability.trace_patient_existence_check() as existence_span:
+            try:
+                patient_found = await patient_exists(openemr_client, payload.patient_id)
+            except OpenEMRClientError:
+                existence_span.update(output={"patient_found": False})
+                logger.error(
+                    "patient_existence_check_failed",
+                    extra={
+                        "event": "patient_existence_check_failed",
+                        "patient_id": payload.patient_id,
+                        "correlation_id": correlation_id,
+                    },
+                    exc_info=True,
+                )
+                trace.update(output={"patient_existence_check": "failed"})
+                return JSONResponse(
+                    status_code=503,
+                    content={
+                        "error": "Could not verify the patient exists in OpenEMR. Please try again.",
+                        "correlation_id": correlation_id,
+                    },
+                )
+            existence_span.update(output={"patient_found": patient_found})
+
+        if not patient_found:
+            logger.info(
+                "patient_not_found",
+                extra={
+                    "event": "patient_not_found",
+                    "patient_id": payload.patient_id,
+                    "correlation_id": correlation_id,
+                },
+            )
+            trace.score_trace(name="verification_passed", value=1, data_type="BOOLEAN")
+            trace.update(output={"patient_found": False})
+            return JSONResponse(
+                status_code=404,
+                content=ChatResponse(
+                    answer=_PATIENT_NOT_FOUND_MESSAGE,
+                    verification=VerificationResult(passed=True, checked_claims=0),
+                    correlation_id=correlation_id,
+                    updated_conversation_history=_updated_conversation_history(
+                        payload.conversation_history,
+                        payload.message,
+                        _PATIENT_NOT_FOUND_MESSAGE,
+                    ),
+                ).model_dump(mode="json"),
+            )
+
+        start = time.monotonic()
+        session_chart = await _patient_session_chart(request, payload.patient_id, openemr_client, correlation_id)
+
+        result = await copilot.chat(
+            payload.patient_id,
+            payload.message,
+            history_dicts,
+            prefetched_chart=session_chart,
+        )
+        latency_ms = round((time.monotonic() - start) * 1000, 2)
+
+        logger.info(
+            "chat_request_completed",
+            extra={
+                "event": "chat_request_completed",
+                "patient_id": payload.patient_id,
+                "tool_call_count": len(result["tool_calls"]),
+                "record_count": len(result["records"]),
+                "latency_ms": latency_ms,
+                "correlation_id": correlation_id,
+            },
+        )
+
+        with observability.trace_verification() as verification_span:
+            verification_known = records_for_verification(result["records"], session_chart)
+            verification_result = verify(result["answer"], verification_known)
+            verification_fields = {
+                "passed": verification_result.passed,
+                "hallucinated_source_count": len(verification_result.hallucinated_sources),
+                "uncited_claim_count": len(verification_result.uncited_claims),
+                "boundary_violation_count": len(verification_result.boundary_violations),
+                "boundary_violations": verification_result.boundary_violations,
+                "checked_claims": verification_result.checked_claims,
+            }
+            verification_span.update(output=verification_fields)
+
+        log_fn = logger.info if verification_result.passed else logger.warning
+        log_fn(
+            "verification_completed",
+            extra={
+                "event": "verification_completed",
+                "patient_id": payload.patient_id,
+                "correlation_id": correlation_id,
+                **verification_fields,
+            },
+        )
+
+        trace.score_trace(name="verification_passed", value=1 if verification_result.passed else 0, data_type="BOOLEAN")
+        trace.update(output={"answer_length": len(result["answer"]), "verification": verification_fields})
+
+    return ChatResponse(
+        answer=result["answer"],
+        verification=verification_result,
+        correlation_id=correlation_id,
+        updated_conversation_history=_updated_conversation_history(
+            payload.conversation_history,
+            payload.message,
+            result["answer"],
+        ),
     )
 
 

@@ -1,0 +1,936 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Clinical Co-Pilot</title>
+  <style>
+    :root {
+      --teal-600: #0d9488;
+      --teal-700: #0f766e;
+      --teal-50: #f0fdfa;
+      --slate-900: #0f172a;
+      --slate-700: #334155;
+      --slate-500: #64748b;
+      --slate-200: #e2e8f0;
+      --slate-100: #f1f5f9;
+      --slate-50: #f8fafc;
+      --white: #ffffff;
+      --success: #059669;
+      --warn: #d97706;
+      --error: #dc2626;
+      --shadow: 0 4px 24px rgba(15, 23, 42, 0.08);
+      --radius: 12px;
+      --font: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      --mono: "Cascadia Code", "SF Mono", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: var(--font);
+      background: linear-gradient(160deg, var(--slate-50) 0%, #e6f7f5 100%);
+      color: var(--slate-900);
+      min-height: 100vh;
+      line-height: 1.5;
+    }
+
+    .hidden { display: none !important; }
+
+    /* ---- Login ---- */
+    .gate {
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: var(--white);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 40px;
+      width: 100%;
+      max-width: 420px;
+      border: 1px solid var(--slate-200);
+    }
+
+    .brand {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+
+    .brand-mark {
+      width: 48px;
+      height: 48px;
+      background: var(--teal-600);
+      border-radius: 10px;
+      margin: 0 auto 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .brand-mark svg { width: 28px; height: 28px; fill: white; }
+
+    .brand h1 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      letter-spacing: -0.02em;
+      color: var(--slate-900);
+    }
+
+    .brand p {
+      font-size: 0.875rem;
+      color: var(--slate-500);
+      margin-top: 6px;
+    }
+
+    label {
+      display: block;
+      font-size: 0.8rem;
+      font-weight: 600;
+      color: var(--slate-700);
+      margin-bottom: 6px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    input[type="text"],
+    input[type="password"],
+    input[type="search"] {
+      width: 100%;
+      padding: 12px 14px;
+      border: 1px solid var(--slate-200);
+      border-radius: 8px;
+      font-size: 1rem;
+      font-family: inherit;
+      transition: border-color 0.15s, box-shadow 0.15s;
+      background: var(--white);
+    }
+
+    input:focus {
+      outline: none;
+      border-color: var(--teal-600);
+      box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.15);
+    }
+
+    .field { margin-bottom: 18px; }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 20px;
+      border: none;
+      border-radius: 8px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      font-family: inherit;
+      cursor: pointer;
+      transition: background 0.15s, transform 0.1s;
+    }
+
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; transform: none; }
+
+    .btn-primary {
+      background: var(--teal-600);
+      color: white;
+      width: 100%;
+    }
+
+    .btn-primary:hover:not(:disabled) { background: var(--teal-700); }
+
+    .btn-ghost {
+      background: transparent;
+      color: var(--slate-500);
+      font-size: 0.85rem;
+      padding: 6px 10px;
+    }
+
+    .btn-ghost:hover { color: var(--slate-700); background: var(--slate-100); }
+
+    .btn-send {
+      background: var(--teal-600);
+      color: white;
+      padding: 12px 18px;
+      flex-shrink: 0;
+    }
+
+    .btn-send:hover:not(:disabled) { background: var(--teal-700); }
+
+    .error-text {
+      color: var(--error);
+      font-size: 0.85rem;
+      margin-top: 12px;
+      text-align: center;
+    }
+
+    /* ---- Patient picker ---- */
+    .picker-card { max-width: 520px; }
+
+    .picker-card h2 {
+      font-size: 1.1rem;
+      font-weight: 600;
+      margin-bottom: 4px;
+    }
+
+    .picker-card .subtitle {
+      font-size: 0.875rem;
+      color: var(--slate-500);
+      margin-bottom: 20px;
+    }
+
+    .patient-list {
+      list-style: none;
+      max-height: 320px;
+      overflow-y: auto;
+      margin-top: 16px;
+      border: 1px solid var(--slate-200);
+      border-radius: 8px;
+    }
+
+    .patient-list li button {
+      width: 100%;
+      text-align: left;
+      padding: 14px 16px;
+      border: none;
+      border-bottom: 1px solid var(--slate-100);
+      background: var(--white);
+      cursor: pointer;
+      font-family: inherit;
+      transition: background 0.12s;
+    }
+
+    .patient-list li:last-child button { border-bottom: none; }
+    .patient-list li button:hover { background: var(--teal-50); }
+
+    .patient-name {
+      font-size: 1.05rem;
+      font-weight: 600;
+      color: var(--slate-900);
+      letter-spacing: -0.01em;
+    }
+
+    .patient-meta {
+      font-size: 0.85rem;
+      font-weight: 400;
+      color: var(--slate-500);
+      margin-top: 4px;
+    }
+
+    .patient-id {
+      display: none;
+    }
+
+    .empty-list {
+      padding: 24px;
+      text-align: center;
+      color: var(--slate-500);
+      font-size: 0.9rem;
+    }
+
+    /* ---- App shell ---- */
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100vh;
+    }
+
+    .topbar {
+      background: var(--white);
+      border-bottom: 1px solid var(--slate-200);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      flex-shrink: 0;
+      box-shadow: 0 1px 3px rgba(15, 23, 42, 0.04);
+    }
+
+    .topbar-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .topbar-logo {
+      width: 32px;
+      height: 32px;
+      background: var(--teal-600);
+      border-radius: 8px;
+      flex-shrink: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .topbar-logo svg { width: 18px; height: 18px; fill: white; }
+
+    .topbar-title {
+      font-weight: 600;
+      font-size: 1rem;
+      white-space: nowrap;
+    }
+
+    .scope-pills {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .pill {
+      font-size: 0.78rem;
+      padding: 5px 10px;
+      border-radius: 999px;
+      background: var(--slate-100);
+      color: var(--slate-700);
+      white-space: nowrap;
+    }
+
+    .pill strong { font-weight: 600; }
+
+    .pill-active {
+      background: var(--teal-50);
+      color: var(--teal-700);
+      border: 1px solid rgba(13, 148, 136, 0.25);
+    }
+
+    .topbar-actions { flex-shrink: 0; }
+
+    /* ---- Chat ---- */
+    .chat-main {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      max-width: 860px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 0 20px;
+    }
+
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 28px 0 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .msg-row {
+      display: flex;
+      flex-direction: column;
+      max-width: 88%;
+    }
+
+    .msg-row.user { align-self: flex-end; align-items: flex-end; }
+    .msg-row.agent { align-self: flex-start; align-items: flex-start; }
+
+    .msg-label {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--slate-500);
+      margin-bottom: 6px;
+      padding: 0 4px;
+    }
+
+    .bubble {
+      padding: 14px 18px;
+      border-radius: 16px;
+      font-size: 0.95rem;
+      line-height: 1.55;
+      word-wrap: break-word;
+    }
+
+    .bubble.user {
+      background: var(--teal-600);
+      color: white;
+      border-bottom-right-radius: 4px;
+    }
+
+    .bubble.agent {
+      background: var(--white);
+      color: var(--slate-900);
+      border: 1px solid var(--slate-200);
+      border-bottom-left-radius: 4px;
+      box-shadow: 0 1px 4px rgba(15, 23, 42, 0.04);
+    }
+
+    .bubble.agent.error {
+      border-color: #fecaca;
+      background: #fef2f2;
+      color: #991b1b;
+    }
+
+    /* Source citations: present for trust/verification, visually quiet in the recap. */
+    .answer-line {
+      margin: 0 0 0.65em;
+    }
+
+    .answer-line:last-child {
+      margin-bottom: 0;
+    }
+
+    .general-context {
+      margin: 0.5em 0;
+      font-size: 0.88rem;
+      color: var(--slate-500);
+      font-style: italic;
+    }
+
+    .cite-trail {
+      display: inline-flex;
+      align-items: center;
+      gap: 3px;
+      margin-left: 5px;
+      vertical-align: baseline;
+      white-space: nowrap;
+    }
+
+    .cite-link {
+      font-size: 0.68rem;
+      line-height: 1;
+      color: var(--slate-500);
+      opacity: 0.55;
+      cursor: help;
+      text-decoration: none;
+      padding: 1px 3px;
+      border-radius: 3px;
+      border: 1px solid transparent;
+      transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+    }
+
+    .cite-link:hover,
+    .cite-link:focus {
+      opacity: 1;
+      color: var(--teal-700);
+      border-color: var(--slate-200);
+      outline: none;
+    }
+
+    .verify-badge {
+      margin-top: 8px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 999px;
+    }
+
+    .verify-badge.ok {
+      background: #ecfdf5;
+      color: var(--success);
+    }
+
+    .verify-badge.warn {
+      background: #fffbeb;
+      color: var(--warn);
+    }
+
+    .verify-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .loading-row {
+      align-self: flex-start;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 12px 16px;
+      background: var(--white);
+      border: 1px solid var(--slate-200);
+      border-radius: 16px;
+      border-bottom-left-radius: 4px;
+      color: var(--slate-500);
+      font-size: 0.875rem;
+    }
+
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--slate-200);
+      border-top-color: var(--teal-600);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .composer {
+      flex-shrink: 0;
+      padding: 16px 0 24px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+      border-top: 1px solid var(--slate-200);
+      background: linear-gradient(180deg, transparent, var(--slate-50) 30%);
+    }
+
+    .composer textarea {
+      flex: 1;
+      resize: none;
+      min-height: 48px;
+      max-height: 140px;
+      padding: 12px 14px;
+      border: 1px solid var(--slate-200);
+      border-radius: 10px;
+      font-size: 0.95rem;
+      font-family: inherit;
+      line-height: 1.45;
+      background: var(--white);
+    }
+
+    .composer textarea:focus {
+      outline: none;
+      border-color: var(--teal-600);
+      box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.12);
+    }
+
+    .composer textarea:disabled { background: var(--slate-100); }
+
+    .footer-note {
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--slate-500);
+      padding-bottom: 12px;
+    }
+  </style>
+</head>
+<body>
+  <!-- Login gate -->
+  <section id="view-login" class="gate">
+    <div class="card">
+      <div class="brand">
+        <div class="brand-mark">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C8.5 2 6 4.5 6 8c0 3.2 2.4 5.9 5.5 6.4V18H9v2h6v-2h-2.5v-3.6C15.6 13.9 18 11.2 18 8c0-3.5-2.5-6-6-6zm0 2c2.2 0 4 1.8 4 4s-1.8 4-4 4-4-1.8-4-4 1.8-4 4-4z"/></svg>
+        </div>
+        <h1>Clinical Co-Pilot</h1>
+        <p>Sourced patient context for between-room decisions</p>
+      </div>
+      <form id="login-form">
+        <div class="field">
+          <label for="username">Username</label>
+          <input type="text" id="username" name="username" autocomplete="username" required />
+        </div>
+        <div class="field">
+          <label for="password">Password</label>
+          <input type="password" id="password" name="password" autocomplete="current-password" required />
+        </div>
+        <button type="submit" class="btn btn-primary" id="login-btn">Sign in</button>
+        <p id="login-error" class="error-text hidden"></p>
+      </form>
+    </div>
+  </section>
+
+  <!-- Patient picker -->
+  <section id="view-picker" class="gate hidden">
+    <div class="card picker-card">
+      <h2>Select a patient</h2>
+      <p class="subtitle">Signed in as <strong id="picker-username"></strong>. Choose one chart — the session stays locked to that patient.</p>
+      <label for="patient-search">Search</label>
+      <input type="search" id="patient-search" placeholder="Search by patient name…" autocomplete="off" />
+      <ul class="patient-list" id="patient-list"></ul>
+      <p id="picker-error" class="error-text hidden"></p>
+      <div style="margin-top: 20px; text-align: center;">
+        <button type="button" class="btn btn-ghost" id="picker-signout">Sign out</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chat app -->
+  <section id="view-chat" class="app hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="topbar-logo">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C8.5 2 6 4.5 6 8c0 3.2 2.4 5.9 5.5 6.4V18H9v2h6v-2h-2.5v-3.6C15.6 13.9 18 11.2 18 8c0-3.5-2.5-6-6-6zm0 2c2.2 0 4 1.8 4 4s-1.8 4-4 4-4-1.8-4-4 4 1.8-4 4-4z"/></svg>
+        </div>
+        <span class="topbar-title">Clinical Co-Pilot</span>
+        <div class="scope-pills">
+          <span class="pill"><strong>Physician</strong> <span id="hdr-physician"></span></span>
+          <span class="pill pill-active"><strong>Patient</strong> <span id="hdr-patient"></span></span>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <button type="button" class="btn btn-ghost" id="chat-change-patient">Change patient</button>
+        <button type="button" class="btn btn-ghost" id="chat-signout">Sign out</button>
+      </div>
+    </header>
+
+    <div class="chat-main">
+      <div class="messages" id="messages" role="log" aria-live="polite"></div>
+      <form class="composer" id="chat-form">
+        <textarea id="message-input" rows="1" placeholder="Ask a follow-up about this patient…" disabled></textarea>
+        <button type="submit" class="btn btn-send" id="send-btn" disabled>Send</button>
+      </form>
+      <p class="footer-note">Every answer is verified against retrieved chart sources. Session scoped to one patient.</p>
+    </div>
+  </section>
+
+  <script>
+    (function () {
+      "use strict";
+
+      // All state in memory only — no localStorage / sessionStorage.
+      const state = {
+        token: null,
+        username: null,
+        patients: [],
+        patientId: null,
+        patientLabel: null,
+        conversationHistory: [],
+        loading: false,
+      };
+
+      const CITATION_RE = /\[([A-Za-z]+)\/([A-Za-z0-9\-]{1,64})\]/g;
+      const OPENING_MESSAGE = "Summarize this patient's chart for me.";
+
+      const $ = (id) => document.getElementById(id);
+
+      const views = {
+        login: $("view-login"),
+        picker: $("view-picker"),
+        chat: $("view-chat"),
+      };
+
+      function showView(name) {
+        Object.entries(views).forEach(([k, el]) => el.classList.toggle("hidden", k !== name));
+      }
+
+      function escapeHtml(text) {
+        return text
+          .replace(/&/g, "&amp;")
+          .replace(/</g, "&lt;")
+          .replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;");
+      }
+
+      function formatSentenceHtml(sentence) {
+        const cites = [];
+        const re = new RegExp(CITATION_RE.source, "g");
+        const prose = sentence
+          .replace(re, (_, type, id) => {
+            cites.push({ type: type, id: id });
+            return "";
+          })
+          .replace(/\s{2,}/g, " ")
+          .trim();
+
+        let html = escapeHtml(prose);
+        if (cites.length > 0) {
+          const chips = cites
+            .map(function (c) {
+              const label = c.type + "/" + c.id;
+              return (
+                '<span class="cite-link" role="img" aria-label="Source: ' +
+                escapeHtml(label) +
+                '" title="' +
+                escapeHtml(label) +
+                '">&#128279;</span>'
+              );
+            })
+            .join("");
+          html += '<span class="cite-trail" aria-hidden="false">' + chips + "</span>";
+        }
+        return html;
+      }
+
+      function formatAnswerHtml(text) {
+        const lines = text.split("\n");
+        const blocks = [];
+        for (let i = 0; i < lines.length; i++) {
+          const trimmed = lines[i].trim();
+          if (!trimmed) {
+            continue;
+          }
+          if (/^general context:/i.test(trimmed)) {
+            blocks.push('<p class="general-context">' + escapeHtml(trimmed) + "</p>");
+            continue;
+          }
+          const sentences = trimmed.split(/(?<=[.!?])\s+/).filter(Boolean);
+          const parts = (sentences.length > 0 ? sentences : [trimmed]).map(formatSentenceHtml);
+          blocks.push('<p class="answer-line">' + parts.join(" ") + "</p>");
+        }
+        return blocks.join("");
+      }
+
+      function countSources(text) {
+        const seen = new Set();
+        let m;
+        const re = new RegExp(CITATION_RE.source, "g");
+        while ((m = re.exec(text)) !== null) {
+          seen.add(m[1] + "/" + m[2]);
+        }
+        return seen.size;
+      }
+
+      function patientName(p) {
+        return (p.name && p.name.trim()) ? p.name.trim() : "Unnamed patient";
+      }
+
+      function patientSecondary(p) {
+        const age = p.age != null ? p.age + "y" : "age ?";
+        const sex = p.sex ? p.sex.charAt(0).toUpperCase() + p.sex.slice(1) : "sex ?";
+        return age + " · " + sex;
+      }
+
+      function scrollMessages() {
+        const el = $("messages");
+        el.scrollTop = el.scrollHeight;
+      }
+
+      function setLoading(on) {
+        state.loading = on;
+        $("message-input").disabled = on;
+        $("send-btn").disabled = on;
+        const existing = $("loading-indicator");
+        if (on) {
+          if (!existing) {
+            const row = document.createElement("div");
+            row.id = "loading-indicator";
+            row.className = "loading-row";
+            row.innerHTML = '<div class="spinner" aria-hidden="true"></div><span>Retrieving chart data…</span>';
+            $("messages").appendChild(row);
+            scrollMessages();
+          }
+        } else if (existing) {
+          existing.remove();
+        }
+      }
+
+      function appendUserBubble(text) {
+        const row = document.createElement("div");
+        row.className = "msg-row user";
+        row.innerHTML =
+          '<span class="msg-label">You</span>' +
+          '<div class="bubble user">' + escapeHtml(text) + "</div>";
+        $("messages").appendChild(row);
+        scrollMessages();
+      }
+
+      function appendAgentBubble(text, verification) {
+        const row = document.createElement("div");
+        row.className = "msg-row agent";
+        const sources = countSources(text);
+        const passed = verification && verification.passed;
+        const badgeClass = passed ? "ok" : "warn";
+        const badgeLabel = passed ? "Verified" : "Unverified";
+        row.innerHTML =
+          '<span class="msg-label">Co-Pilot</span>' +
+          '<div class="bubble agent">' + formatAnswerHtml(text) + "</div>" +
+          '<span class="verify-badge ' + badgeClass + '">' +
+          '<span class="verify-dot"></span>' + badgeLabel + " · " + sources + " source" + (sources === 1 ? "" : "s") +
+          "</span>";
+        $("messages").appendChild(row);
+        scrollMessages();
+      }
+
+      function appendErrorBubble(message) {
+        const row = document.createElement("div");
+        row.className = "msg-row agent";
+        row.innerHTML =
+          '<span class="msg-label">Co-Pilot</span>' +
+          '<div class="bubble agent error">' + escapeHtml(message) + "</div>";
+        $("messages").appendChild(row);
+        scrollMessages();
+      }
+
+      function resetSession(keepAuth) {
+        state.patientId = null;
+        state.patientLabel = null;
+        state.conversationHistory = [];
+        $("messages").innerHTML = "";
+        if (!keepAuth) {
+          state.token = null;
+          state.username = null;
+          state.patients = [];
+        }
+      }
+
+      function signOut() {
+        resetSession(false);
+        $("login-form").reset();
+        $("login-error").classList.add("hidden");
+        showView("login");
+      }
+
+      async function apiPost(path, body) {
+        const headers = { "Content-Type": "application/json" };
+        if (state.token) headers["Authorization"] = "Bearer " + state.token;
+        const res = await fetch(path, { method: "POST", headers, body: JSON.stringify(body) });
+        const data = await res.json().catch(() => ({}));
+        return { ok: res.ok, status: res.status, data };
+      }
+
+      async function apiGet(path) {
+        const headers = {};
+        if (state.token) headers["Authorization"] = "Bearer " + state.token;
+        const res = await fetch(path, { headers });
+        const data = await res.json().catch(() => ({}));
+        return { ok: res.ok, status: res.status, data };
+      }
+
+      // ---- Login ----
+      $("login-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const btn = $("login-btn");
+        const errEl = $("login-error");
+        errEl.classList.add("hidden");
+        btn.disabled = true;
+        try {
+          const { ok, data } = await apiPost("/login", {
+            username: $("username").value.trim(),
+            password: $("password").value,
+          });
+          if (!ok) {
+            errEl.textContent = data.detail || data.error || "Invalid credentials.";
+            errEl.classList.remove("hidden");
+            return;
+          }
+          state.token = data.token;
+          state.username = data.username;
+          $("picker-username").textContent = state.username;
+          await loadPatients();
+          showView("picker");
+        } catch {
+          errEl.textContent = "Could not reach the server. Try again.";
+          errEl.classList.remove("hidden");
+        } finally {
+          btn.disabled = false;
+        }
+      });
+
+      $("picker-signout").addEventListener("click", signOut);
+      $("chat-signout").addEventListener("click", signOut);
+
+      // ---- Patients ----
+      async function loadPatients() {
+        const errEl = $("picker-error");
+        errEl.classList.add("hidden");
+        const { ok, data } = await apiGet("/patients");
+        if (!ok) {
+          errEl.textContent = data.error || "Could not load patients.";
+          errEl.classList.remove("hidden");
+          state.patients = [];
+        } else {
+          state.patients = Array.isArray(data) ? data : (data.patients || []);
+        }
+        renderPatientList($("patient-search").value);
+      }
+
+      function renderPatientList(filter) {
+        const list = $("patient-list");
+        list.innerHTML = "";
+        const q = (filter || "").trim().toLowerCase();
+        const filtered = state.patients.filter((p) => {
+          if (!q) return true;
+          const name = (p.name || "").toLowerCase();
+          return name.includes(q);
+        });
+        if (filtered.length === 0) {
+          list.innerHTML = '<li class="empty-list">No patients match your search.</li>';
+          return;
+        }
+        filtered.forEach((p) => {
+          const li = document.createElement("li");
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.innerHTML =
+            '<div class="patient-name">' + escapeHtml(patientName(p)) + "</div>" +
+            '<div class="patient-meta">' + escapeHtml(patientSecondary(p)) + "</div>";
+          btn.addEventListener("click", () => selectPatient(p));
+          li.appendChild(btn);
+          list.appendChild(li);
+        });
+      }
+
+      $("patient-search").addEventListener("input", (e) => {
+        renderPatientList(e.target.value);
+      });
+
+      // ---- Chat ----
+      async function selectPatient(p) {
+        resetSession(true);
+        state.patientId = p.id;
+        state.patientLabel = patientName(p);
+        $("hdr-physician").textContent = state.username;
+        $("hdr-patient").textContent = patientName(p) + " · " + patientSecondary(p);
+        $("message-input").disabled = false;
+        $("send-btn").disabled = false;
+        showView("chat");
+        await sendChatMessage(OPENING_MESSAGE);
+      }
+
+      $("chat-change-patient").addEventListener("click", () => {
+        resetSession(true);
+        $("message-input").value = "";
+        showView("picker");
+      });
+
+      async function sendChatMessage(text) {
+        if (!state.patientId || state.loading) return;
+
+        appendUserBubble(text);
+
+        setLoading(true);
+        try {
+          const { ok, status, data } = await apiPost("/chat", {
+            patient_id: state.patientId,
+            message: text,
+            conversation_history: state.conversationHistory,
+          });
+
+          if (!ok) {
+            const msg = data.error || data.answer || ("Request failed (" + status + ").");
+            appendErrorBubble(msg);
+            return;
+          }
+
+          state.conversationHistory = data.updated_conversation_history || [];
+          appendAgentBubble(data.answer, data.verification);
+        } catch {
+          appendErrorBubble("Network error — could not reach the agent. Please try again.");
+        } finally {
+          setLoading(false);
+        }
+      }
+
+      $("chat-form").addEventListener("submit", async (e) => {
+        e.preventDefault();
+        const input = $("message-input");
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        await sendChatMessage(text, false);
+      });
+
+      $("message-input").addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          $("chat-form").requestSubmit();
+        }
+      });
+
+      // Auto-resize textarea
+      $("message-input").addEventListener("input", function () {
+        this.style.height = "auto";
+        this.style.height = Math.min(this.scrollHeight, 140) + "px";
+      });
+    })();
+  </script>
+</body>
+</html>

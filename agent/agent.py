@@ -34,6 +34,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import Message
 
 from agent import observability
+from agent.cache import CachedPatientChart
 from agent.openemr_client import OpenEMRClient
 from agent.schemas import SourcedRecord, ToolResult
 from agent.tools import TOOL_FUNCTIONS, TOOL_SPECS
@@ -117,6 +118,25 @@ chart-specific claim without that claim's own citation. Introduce it on its \
 own line beginning with exactly "General context:" so it is never mistaken \
 for a sourced statement about this patient -- it needs no bracketed source \
 of its own, because rule 2 only requires one for claims ABOUT this patient.
+
+9. Physician-facing presentation (between-rooms recap — read in ~5 seconds):
+- Demographics from get_intake: one compact phrase only, e.g. "22-year-old \
+male" or "45-year-old female". No patient_id, UUID, or other metadata \
+inline.
+- Diagnoses: list each condition by its `display` name on its own line with \
+its [Condition/id] citation — plain names only, no active/inactive narration, \
+no counts, no status commentary. Include all conditions returned by \
+get_diagnosis (active, inactive, resolved) in recap/summary answers. If \
+get_diagnosis has missing=true or zero records, say only "No diagnoses on \
+file." Use each record's `display` field as the condition name (it may be a \
+readable title or, when OpenEMR omits one, the ICD code itself). Never \
+invent a name. Do not add `clinical_status`, `source_date`, or \
+parenthetical status/date commentary inline.
+- Medications and other facts: plain language names; avoid dumping internal \
+status or recorded-date metadata inline unless the physician specifically \
+asks.
+- Keep "General context:" lines (rule 8) and explicit missing-data / \
+retrieval-failure wording (rules 3–4) — those are appropriate as written.
 """
 
 
@@ -180,8 +200,39 @@ class ClinicalCoPilot:
             f"the data layer, not controlled by your tool-call arguments.)"
         )
 
-    async def answer(self, patient_id: str, question: str) -> dict[str, Any]:
-        """Answer one physician question about one patient.
+    async def answer(
+        self,
+        patient_id: str,
+        question: str,
+        *,
+        prefetched_chart: CachedPatientChart | None = None,
+    ) -> dict[str, Any]:
+        """Answer one stateless physician question about one patient.
+
+        Thin wrapper around `chat()` with an empty history — keeps /ask and
+        the eval suite on the original single-turn path.
+        """
+        return await self.chat(
+            patient_id,
+            question,
+            [],
+            prefetched_chart=prefetched_chart,
+        )
+
+    async def chat(
+        self,
+        patient_id: str,
+        message: str,
+        conversation_history: list[dict[str, str]],
+        *,
+        prefetched_chart: CachedPatientChart | None = None,
+    ) -> dict[str, Any]:
+        """Answer one turn in a multi-turn session about one patient.
+
+        `conversation_history` is the prior published user/assistant turns
+        for this session (plain text only — not internal tool_use blocks).
+        The current `message` is appended as the latest user turn before
+        the tool-calling loop runs.
 
         Returns a dict with three keys, per this project's verification
         design (a downstream layer re-checks every [ResourceType/id]
@@ -194,8 +245,22 @@ class ClinicalCoPilot:
         - "records": every SourcedRecord returned by every tool call this
           turn, flattened into one list -- the ground truth the
           verification layer checks citations against.
+
+        `prefetched_chart` -- a `CachedPatientChart` from `cache.py`, when
+        `main.py` already loaded the four first-visit tools (cache hit or
+        post-fetch store). Tool dispatch returns those results without
+        re-hitting OpenEMR; the LLM still drives which tools it asks for.
         """
-        messages: list[dict[str, Any]] = [{"role": "user", "content": question}]
+        prefetch_map: dict[str, ToolResult[Any]] | None = None
+        if prefetched_chart is not None:
+            prefetch_map = prefetched_chart.as_prefetch_map()
+        messages: list[dict[str, Any]] = []
+        for turn in conversation_history:
+            role = turn["role"]
+            if role not in ("user", "assistant"):
+                raise ValueError(f"conversation_history role must be 'user' or 'assistant', got {role!r}.")
+            messages.append({"role": role, "content": turn["content"]})
+        messages.append({"role": "user", "content": message})
         tool_calls_made: list[dict[str, Any]] = []
         records_retrieved: list[SourcedRecord] = []
         final_text: str | None = None
@@ -247,7 +312,7 @@ class ClinicalCoPilot:
             # them -- awaiting them one at a time would only add dead time
             # to a physician's seconds-level latency budget for no benefit.
             results = await asyncio.gather(
-                *(self._dispatch_tool_call(block, patient_id) for block in tool_use_blocks)
+                *(self._dispatch_tool_call(block, patient_id, prefetch_map) for block in tool_use_blocks)
             )
 
             tool_result_content: list[dict[str, Any]] = []
@@ -291,17 +356,29 @@ class ClinicalCoPilot:
             "records": records_retrieved,
         }
 
-    async def _dispatch_tool_call(self, block: Any, trusted_patient_id: str) -> ToolResult[Any]:
+    async def _dispatch_tool_call(
+        self,
+        block: Any,
+        trusted_patient_id: str,
+        prefetched: dict[str, ToolResult[Any]] | None = None,
+    ) -> ToolResult[Any]:
         """Execute one tool_use block against OpenEMR.
 
         `trusted_patient_id` -- the value `answer()` was called with, never
         the model's own tool-input value -- is what's actually used. See
         the module docstring: the LLM is never the security boundary, and
         that is enforced right here, not by asking nicely in the prompt.
+
+        `prefetched` -- when `main.py` already assembled the four first-visit
+        tool results (encrypted cache hit or fresh fetch), serve those
+        without a second OpenEMR round-trip for the same data.
         """
         tool_fn = TOOL_FUNCTIONS.get(block.name)
         if tool_fn is None:
             return ToolResult(records=[], missing=False, error=f"Unknown tool '{block.name}'.")
+
+        if prefetched is not None and block.name in prefetched:
+            return prefetched[block.name]
 
         requested_input = block.input if isinstance(block.input, dict) else {}
         requested_patient_id = requested_input.get("patient_id")

@@ -101,11 +101,11 @@ class DiagnosisRecord(SourcedRecord):
     display: str = Field(
         ...,
         description=(
-            "Human-readable condition name. Required (not Optional) because "
-            "a diagnosis record with neither a code nor a display name "
-            "carries no clinical meaning and should not be constructed by "
-            "a tool in the first place -- that case belongs in ToolResult's "
-            "missing/error path, not as an empty-looking record."
+            "Human-readable condition name for physician-facing text (recap "
+            "sentences). Required. Populated from FHIR display/text when "
+            "available; bare ICD-10 codes are mapped to readable descriptions "
+            "in tools.py. clinical_status and onset_date are separate — not "
+            "inlined in recap answers."
         ),
     )
     clinical_status: Optional[str] = Field(

@@ -25,9 +25,10 @@ the server actually returned something the parser couldn't use.
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Callable
 from datetime import date, datetime
-from typing import Any, TypeVar
+from typing import Any, Final, TypeVar
 
 from agent.openemr_client import OpenEMRClient, OpenEMRClientError, OpenEMRNotFoundError
 from agent.schemas import (
@@ -40,6 +41,37 @@ from agent.schemas import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Bare ICD-10 strings (e.g. "H04.123") are not physician-facing recap text.
+# When OpenEMR leaves coding.display empty, map known demo codes to readable
+# names here; FHIR display/text still wins when present. Status and dates
+# on DiagnosisRecord stay for audit — not inlined in recap sentences.
+_ICD10_LIKE: Final[re.Pattern[str]] = re.compile(r"^[A-Z][0-9]{2}(\.[A-Z0-9]+)?$")
+_ICD10_PHYSICIAN_NAMES: Final[dict[str, str]] = {
+    "H04.123": "Dry eye syndrome of bilateral lacrimal glands",
+    "H02.839": "Unspecified disorder of eyelid",
+}
+
+
+def _physician_readable_condition_name(code: str | None, display: str | None) -> str | None:
+    """Plain-language condition name for physician-facing answers.
+
+    Priority: (1) FHIR display/text when it is human language, (2) optional
+    readable-name map for known demo codes, (3) the raw ICD code itself.
+    Never returns None when ``code`` is present — a coded Condition must not
+    be silently dropped because OpenEMR left ``coding.display`` empty.
+    """
+    if display is not None:
+        stripped = display.strip()
+        if stripped and not _ICD10_LIKE.match(stripped):
+            return stripped
+    if code is not None and code in _ICD10_PHYSICIAN_NAMES:
+        return _ICD10_PHYSICIAN_NAMES[code]
+    if code is not None and code.strip():
+        return code.strip()
+    if display is not None and display.strip():
+        return display.strip()
+    return None
 
 T = TypeVar("T", bound=SourcedRecord)
 
@@ -246,23 +278,9 @@ def _parse_condition(resource: dict[str, Any]) -> DiagnosisRecord | None:
 
     code_concept = resource.get("code")
     code, display = _code_and_display(code_concept) if isinstance(code_concept, dict) else (None, None)
-    if display is None:
-        # Confirmed against this project's live OpenEMR instance: real
-        # Condition resources here carry a populated ICD-10 `coding.code`
-        # (e.g. "H04.123") but an EMPTY `coding.display` string and no
-        # concept-level `.text` -- `_code_and_display` correctly treats an
-        # empty string as absent, so `display` legitimately comes back
-        # None even though the record is far from unusable. A bare code is
-        # still clinically meaningful (any clinician recognizes an ICD-10
-        # code on sight, and the agent's LLM can reason about what it
-        # means) -- falling back to it here matches this field's own
-        # docstring in schemas.py ("required because a diagnosis record
-        # with NEITHER a code NOR a display name carries no clinical
-        # meaning"), which was already the intent; only the code below had
-        # drifted to checking display alone.
-        display = code
-    if display is None:
-        return None  # Neither a code nor a display/text -- nothing usable to show.
+    readable_name = _physician_readable_condition_name(code, display)
+    if readable_name is None:
+        return None  # No code and no display/text — nothing usable to show.
 
     status_concept = resource.get("clinicalStatus")
     clinical_status = _first_coding_code(status_concept) if isinstance(status_concept, dict) else None
@@ -278,7 +296,7 @@ def _parse_condition(resource: dict[str, Any]) -> DiagnosisRecord | None:
         source_type="Condition",
         source_date=_first_present_date(resource, "recordedDate"),
         code=code,
-        display=display,
+        display=readable_name,
         clinical_status=clinical_status,
         onset_date=onset_date,
     )

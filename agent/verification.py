@@ -43,6 +43,7 @@ from typing import Final
 
 from pydantic import BaseModel, Field
 
+from agent.cache import CachedPatientChart
 from agent.schemas import SourcedRecord
 
 # --------------------------------------------------------------------------
@@ -138,6 +139,10 @@ _PERMITTED_UNCITED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
         # purpose: rule 8 requires Claude to use this exact wording
         # specifically so this check can match it exactly, not guess.
         r"^general context:",
+        # session.py's fixed other-patient refusal (main.py /chat gate) —
+        # procedural, not a clinical claim about this patient.
+        r"only address the patient scoped to this session",
+        r"cannot look up or discuss a different patient identifier",
     )
 )
 
@@ -259,15 +264,37 @@ class VerificationResult(BaseModel):
 # --------------------------------------------------------------------------
 
 
-def verify(answer_text: str, retrieved_records: list[SourcedRecord]) -> VerificationResult:
-    """Check one agent answer's citations and language against what was actually retrieved.
+def records_for_verification(
+    turn_records: list[SourcedRecord],
+    session_chart: CachedPatientChart | None,
+) -> list[SourcedRecord]:
+    """Build the record set citations are checked against for one turn.
 
-    `retrieved_records` must be the exact `records` list `ClinicalCoPilot.answer()`
-    returned for this same turn (see agent.py) -- this function has no other
-    way to know what a citation is allowed to point at. It does not call
-    OpenEMR, Anthropic, or anything else: pure string/set logic over its two
-    arguments, which is what makes it deterministic and independent of
-    whatever the model "believes" it did.
+    Opening turns usually populate ``turn_records`` via tool calls (or
+    prefetch). Follow-up turns often answer from conversation context without
+    re-running tools, leaving ``turn_records`` empty even though the answer
+    still cites [Condition/id] values from the opening recap.
+
+    A citation is valid only if it appears in records actually retrieved for
+    this patient during the session — the assembled first-visit chart in
+    ``session_chart`` (cache/prefetch), unioned with anything freshly
+    returned this turn. Citations to resources never in that union     still fail.
+    """
+    by_key: dict[tuple[str, str], SourcedRecord] = {}
+    if session_chart is not None:
+        for record in session_chart.all_records():
+            by_key[(record.source_type, record.source_id)] = record
+    for record in turn_records:
+        by_key[(record.source_type, record.source_id)] = record
+    return list(by_key.values())
+
+
+def verify(answer_text: str, retrieved_records: list[SourcedRecord]) -> VerificationResult:
+    """Check one agent answer's citations and language against known records.
+
+    Callers should pass the output of :func:`records_for_verification` so
+    follow-up turns validate citations against the session chart, not only
+    records freshly returned on this turn. Does not call OpenEMR or Anthropic.
     """
     known_sources = {f"{record.source_type}/{record.source_id}" for record in retrieved_records}
 
