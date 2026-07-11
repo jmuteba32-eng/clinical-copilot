@@ -4,6 +4,11 @@ Records WHO accessed WHICH patient (opaque UUID) and WHEN — never chart
 contents, questions, answers, or other clinical data. Mirrors the AUDIT.md
 finding that OpenEMR persisted full API response bodies; this store is
 metadata-only by design.
+
+Persistence path is fully controlled by the ``AUDIT_LOG_PATH`` environment
+variable (default ``agent/audit_log.jsonl`` relative to the repo root).
+For Railway, mount a persistent volume (e.g. at ``/data``) and set
+``AUDIT_LOG_PATH=/data/audit_log.jsonl`` so events survive redeploys.
 """
 
 from __future__ import annotations
@@ -46,7 +51,22 @@ class AuditTrail:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = asyncio.Lock()
-        self._path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_parent_dir()
+
+    def _ensure_parent_dir(self) -> None:
+        """Create the parent directory if needed (e.g. ``/data`` on a Railway volume)."""
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+        except PermissionError:
+            logger.warning(
+                "audit_log_dir_permission_denied",
+                extra={"event": "audit_log_dir_permission_denied", "path": str(self._path.parent)},
+            )
+        except OSError as exc:
+            logger.warning(
+                "audit_log_dir_unavailable",
+                extra={"event": "audit_log_dir_unavailable", "path": str(self._path.parent), "error": str(exc)},
+            )
 
     @classmethod
     def from_env(cls) -> AuditTrail:
@@ -71,8 +91,22 @@ class AuditTrail:
             outcome=outcome,
         )
         line = record.model_dump_json() + "\n"
-        with self._path.open("a", encoding="utf-8") as handle:
-            handle.write(line)
+        try:
+            self._ensure_parent_dir()
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(line)
+                handle.flush()
+                os.fsync(handle.fileno())
+        except PermissionError:
+            logger.warning(
+                "audit_log_write_permission_denied",
+                extra={"event": "audit_log_write_permission_denied", "path": str(self._path)},
+            )
+        except OSError as exc:
+            logger.warning(
+                "audit_log_write_failed",
+                extra={"event": "audit_log_write_failed", "path": str(self._path), "error": str(exc)},
+            )
 
     async def append(
         self,
@@ -118,6 +152,7 @@ class AuditTrail:
 
 
 def _resolve_audit_log_path(raw: str) -> Path:
+    """Resolve ``AUDIT_LOG_PATH``: absolute paths are used as-is; relative paths are repo-rooted."""
     path = Path(raw)
     if path.is_absolute():
         return path

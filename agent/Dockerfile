@@ -28,9 +28,19 @@ ENV PYTHONUNBUFFERED=1 \
 EXPOSE 8000
 
 # Least privilege: this process only ever makes outbound HTTPS calls to
-# OpenEMR and Anthropic, so it has no legitimate reason to run as root.
-RUN useradd --create-home --uid 1000 appuser
-USER appuser
+# OpenEMR and Anthropic, so it has no legitimate reason to run as root
+# during request handling. We still start as root via the entrypoint so
+# Railway's mounted /data volume (root-owned at attach time) can be
+# chowned to appuser before uvicorn drops privileges.
+RUN useradd --create-home --uid 1000 appuser \
+    && mkdir -p /data \
+    && chown appuser:appuser /data
+
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+USER root
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 # Shell form so ${PORT:-8000} expands at container start, when the platform's
 # actual PORT value is known. --no-access-log avoids duplicating the
