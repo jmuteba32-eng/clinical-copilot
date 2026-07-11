@@ -1,5 +1,6 @@
 # logs
 /logs
+agent/audit_log.jsonl
 
 # environment vars
 .env

@@ -304,6 +304,85 @@
 
     .topbar-actions { flex-shrink: 0; }
 
+    /* ---- Audit log ---- */
+    .audit-main {
+      flex: 1;
+      overflow: auto;
+      padding: 24px;
+      max-width: 1100px;
+      margin: 0 auto;
+      width: 100%;
+    }
+
+    .audit-table-wrap {
+      background: var(--white);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      border: 1px solid var(--slate-200);
+      overflow: auto;
+    }
+
+    .audit-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.875rem;
+    }
+
+    .audit-table th,
+    .audit-table td {
+      padding: 12px 14px;
+      text-align: left;
+      border-bottom: 1px solid var(--slate-100);
+      vertical-align: top;
+    }
+
+    .audit-table th {
+      background: var(--slate-50);
+      font-weight: 600;
+      font-size: 0.72rem;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: var(--slate-700);
+      position: sticky;
+      top: 0;
+    }
+
+    .audit-table tr:last-child td { border-bottom: none; }
+
+    .audit-table td.mono {
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      color: var(--slate-700);
+      word-break: break-all;
+    }
+
+    .audit-empty {
+      padding: 32px;
+      text-align: center;
+      color: var(--slate-500);
+      font-size: 0.9rem;
+    }
+
+    .event-pill {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      background: var(--slate-100);
+      color: var(--slate-700);
+      white-space: nowrap;
+    }
+
+    .event-pill.login { background: #dbeafe; color: #1d4ed8; }
+    .event-pill.patient_access { background: var(--teal-50); color: var(--teal-700); }
+    .event-pill.access_refused { background: #fef3c7; color: #b45309; }
+    .event-pill.logout { background: var(--slate-100); color: var(--slate-700); }
+
+    .outcome-ok { color: var(--success); font-weight: 600; }
+    .outcome-warn { color: var(--warn); font-weight: 600; }
+    .outcome-err { color: var(--error); font-weight: 600; }
+
     /* ---- Chat ---- */
     .chat-main {
       flex: 1;
@@ -546,7 +625,8 @@
       <input type="search" id="patient-search" placeholder="Search by patient name…" autocomplete="off" />
       <ul class="patient-list" id="patient-list"></ul>
       <p id="picker-error" class="error-text hidden"></p>
-      <div style="margin-top: 20px; text-align: center;">
+      <div style="margin-top: 20px; text-align: center; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
+        <button type="button" class="btn btn-ghost" id="picker-audit">Audit Log</button>
         <button type="button" class="btn btn-ghost" id="picker-signout">Sign out</button>
       </div>
     </div>
@@ -566,6 +646,7 @@
         </div>
       </div>
       <div class="topbar-actions">
+        <button type="button" class="btn btn-ghost" id="chat-audit">Audit Log</button>
         <button type="button" class="btn btn-ghost" id="chat-change-patient">Change patient</button>
         <button type="button" class="btn btn-ghost" id="chat-signout">Sign out</button>
       </div>
@@ -578,6 +659,42 @@
         <button type="submit" class="btn btn-send" id="send-btn" disabled>Send</button>
       </form>
       <p class="footer-note">Every answer is verified against retrieved chart sources. Session scoped to one patient.</p>
+    </div>
+  </section>
+
+  <!-- Audit log -->
+  <section id="view-audit" class="app hidden">
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="topbar-logo">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C8.5 2 6 4.5 6 8c0 3.2 2.4 5.9 5.5 6.4V18H9v2h6v-2h-2.5v-3.6C15.6 13.9 18 11.2 18 8c0-3.5-2.5-6-6-6zm0 2c2.2 0 4 1.8 4 4s-1.8 4-4 4-4-1.8-4-4 1.8-4 4-4z"/></svg>
+        </div>
+        <span class="topbar-title">Access Audit Log</span>
+        <span class="pill"><strong>User</strong> <span id="audit-username"></span></span>
+      </div>
+      <div class="topbar-actions">
+        <button type="button" class="btn btn-ghost" id="audit-back-picker">Patients</button>
+        <button type="button" class="btn btn-ghost" id="audit-back-chat">Back to chat</button>
+        <button type="button" class="btn btn-ghost" id="audit-signout">Sign out</button>
+      </div>
+    </header>
+    <div class="audit-main">
+      <p id="audit-error" class="error-text hidden" style="margin-bottom: 16px;"></p>
+      <div class="audit-table-wrap">
+        <table class="audit-table" id="audit-table">
+          <thead>
+            <tr>
+              <th>Timestamp (UTC)</th>
+              <th>User</th>
+              <th>Event</th>
+              <th>Patient ID</th>
+              <th>Outcome</th>
+            </tr>
+          </thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+        <p id="audit-empty" class="audit-empty hidden">No access events recorded yet.</p>
+      </div>
     </div>
   </section>
 
@@ -605,10 +722,19 @@
         login: $("view-login"),
         picker: $("view-picker"),
         chat: $("view-chat"),
+        audit: $("view-audit"),
       };
 
+      let priorView = "picker";
+
       function showView(name) {
+        if (name !== "audit" && views[name] && !views[name].classList.contains("hidden")) {
+          priorView = name;
+        }
         Object.entries(views).forEach(([k, el]) => el.classList.toggle("hidden", k !== name));
+        if (name === "audit") {
+          $("audit-back-chat").classList.toggle("hidden", !state.patientId);
+        }
       }
 
       function escapeHtml(text) {
@@ -762,10 +888,84 @@
       }
 
       function signOut() {
+        if (state.token) {
+          apiPost("/logout", {}).catch(function () {});
+        }
         resetSession(false);
         $("login-form").reset();
         $("login-error").classList.add("hidden");
         showView("login");
+      }
+
+      function formatEventType(type) {
+        const labels = {
+          login: "Login",
+          patient_access: "Patient Access",
+          access_refused: "Access Refused",
+          logout: "Logout",
+        };
+        return labels[type] || type;
+      }
+
+      function formatOutcome(outcome) {
+        return (outcome || "").replace(/_/g, " ");
+      }
+
+      function outcomeClass(outcome) {
+        if (!outcome) return "";
+        if (outcome === "success") return "outcome-ok";
+        if (outcome === "failure" || outcome === "openemr_unreachable") return "outcome-err";
+        if (outcome === "refused" || outcome === "patient_not_found") return "outcome-warn";
+        return "";
+      }
+
+      function formatTimestampUtc(iso) {
+        if (!iso) return "—";
+        const d = new Date(iso);
+        if (Number.isNaN(d.getTime())) return iso;
+        return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
+      }
+
+      async function loadAuditLog() {
+        const errEl = $("audit-error");
+        const tbody = $("audit-tbody");
+        const emptyEl = $("audit-empty");
+        errEl.classList.add("hidden");
+        tbody.innerHTML = "";
+        emptyEl.classList.add("hidden");
+        $("audit-username").textContent = state.username || "—";
+
+        const { ok, data } = await apiGet("/audit");
+        if (!ok) {
+          errEl.textContent = data.error || "Could not load audit log.";
+          errEl.classList.remove("hidden");
+          return;
+        }
+
+        const rows = Array.isArray(data) ? data : [];
+        if (rows.length === 0) {
+          emptyEl.classList.remove("hidden");
+          $("audit-table").classList.add("hidden");
+          return;
+        }
+
+        $("audit-table").classList.remove("hidden");
+        rows.forEach(function (row) {
+          const tr = document.createElement("tr");
+          const eventClass = "event-pill " + (row.event_type || "").replace(/ /g, "_");
+          tr.innerHTML =
+            "<td class=\"mono\">" + escapeHtml(formatTimestampUtc(row.timestamp)) + "</td>" +
+            "<td>" + escapeHtml(row.username || "—") + "</td>" +
+            "<td><span class=\"" + escapeHtml(eventClass) + "\">" + escapeHtml(formatEventType(row.event_type)) + "</span></td>" +
+            "<td class=\"mono\">" + escapeHtml(row.patient_id || "—") + "</td>" +
+            "<td class=\"" + escapeHtml(outcomeClass(row.outcome)) + "\">" + escapeHtml(formatOutcome(row.outcome)) + "</td>";
+          tbody.appendChild(tr);
+        });
+      }
+
+      async function openAuditView() {
+        showView("audit");
+        await loadAuditLog();
       }
 
       async function apiPost(path, body) {
@@ -816,6 +1016,15 @@
 
       $("picker-signout").addEventListener("click", signOut);
       $("chat-signout").addEventListener("click", signOut);
+      $("audit-signout").addEventListener("click", signOut);
+      $("picker-audit").addEventListener("click", openAuditView);
+      $("chat-audit").addEventListener("click", openAuditView);
+      $("audit-back-picker").addEventListener("click", function () {
+        showView("picker");
+      });
+      $("audit-back-chat").addEventListener("click", function () {
+        if (state.patientId) showView("chat");
+      });
 
       // ---- Patients ----
       async function loadPatients() {

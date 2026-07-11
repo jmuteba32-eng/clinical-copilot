@@ -90,6 +90,17 @@ def _extract_citations(answer_text: str) -> list[str]:
 
 _SENTENCE_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"(?<=[.!?])\s+")
 
+# Rule 8 (agent.py): explanatory background the physician should not read as a
+# chart-specific cited claim. Recognized wherever it appears — combined at
+# the bottom after "---", multiple clauses on one line, or the canonical
+# one-line-per-note format.
+_LEADING_DIVIDER_RE: Final[re.Pattern[str]] = re.compile(r"^\s*---\s*")
+_STANDALONE_DIVIDER_LINE_RE: Final[re.Pattern[str]] = re.compile(r"^\s*---\s*$", re.MULTILINE)
+_DIVIDER_BEFORE_GENERAL_CONTEXT_RE: Final[re.Pattern[str]] = re.compile(
+    r"\s*---\s*(?=General context:)",
+    re.IGNORECASE,
+)
+
 # Phrasings the system prompt's own rules instruct Claude to use for the
 # cases where NOT citing is correct, not a gap: rule 3 (missing data), rule
 # 4 (tool error), rule 6 (declining to diagnose/prescribe/dose/judge), rule
@@ -129,16 +140,6 @@ _PERMITTED_UNCITED_PATTERNS: Final[tuple[re.Pattern[str], ...]] = tuple(
         r"try a narrower or simpler question",
         r"this response was truncated",
         r"cannot (diagnose|prescribe|recommend a dose|judge)",
-        # Rule 8's exact required prefix for general (non-chart-specific)
-        # background -- e.g. "General context: H04.123 typically refers to
-        # a lacrimal condition." A sentence starting with this literal
-        # marker is, by construction, not a claim about this patient (see
-        # agent.py's rule 8), so it is exempt from the citation requirement
-        # rather than flagged as an uncited claim. This is a fixed prefix,
-        # not a paraphrase-tolerant pattern like the others above, on
-        # purpose: rule 8 requires Claude to use this exact wording
-        # specifically so this check can match it exactly, not guess.
-        r"^general context:",
         # session.py's fixed other-patient refusal (main.py /chat gate) —
         # procedural, not a clinical claim about this patient.
         r"only address the patient scoped to this session",
@@ -175,7 +176,37 @@ def _split_sentences(answer_text: str) -> list[str]:
     return [s.strip() for s in _SENTENCE_SPLIT_RE.split(normalized) if s.strip()]
 
 
+def _is_general_context_unit(text: str) -> bool:
+    """True when ``text`` is rule-8 explanatory background, not a chart claim."""
+    stripped = _LEADING_DIVIDER_RE.sub("", text.strip())
+    return bool(re.match(r"^general context:", stripped, re.IGNORECASE))
+
+
+def _expand_verification_units(answer_text: str) -> list[str]:
+    """Split answer text into units for the uncited-claim checker.
+
+    Separates each ``General context:`` clause even when the model combined
+    them after a ``---`` divider (a recap formatting failure this module
+    must tolerate without falsely flagging legitimate background). Non-general
+    chunks are still sentence-split so follow-up paragraph prose is checked.
+    """
+    text = _STANDALONE_DIVIDER_LINE_RE.sub("\n", answer_text)
+    text = _DIVIDER_BEFORE_GENERAL_CONTEXT_RE.sub(" ", text)
+    units: list[str] = []
+    for chunk in re.split(r"(?i)(?=General context:)", text):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if _is_general_context_unit(chunk):
+            units.append(chunk)
+            continue
+        units.extend(_split_sentences(chunk))
+    return units
+
+
 def _is_permitted_uncited(sentence: str) -> bool:
+    if _is_general_context_unit(sentence):
+        return True
     return any(pattern.search(sentence) for pattern in _PERMITTED_UNCITED_PATTERNS)
 
 
@@ -303,7 +334,7 @@ def verify(answer_text: str, retrieved_records: list[SourcedRecord]) -> Verifica
 
     checked_claims = 0
     uncited_claims: list[str] = []
-    for sentence in _split_sentences(answer_text):
+    for sentence in _expand_verification_units(answer_text):
         if _CITATION_RE.search(sentence):
             checked_claims += 1
             continue

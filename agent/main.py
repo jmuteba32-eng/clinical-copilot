@@ -46,6 +46,7 @@ from pydantic import BaseModel, Field
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from agent import observability  # noqa: E402
+from agent.audit_trail import AuditRecord, AuditTrail  # noqa: E402
 from agent.agent import ClinicalCoPilot  # noqa: E402
 from agent.cache import CachedPatientChart, PatientChartCache, fetch_patient_chart, refresh_chart_diagnosis  # noqa: E402
 from agent.keep_warm import keep_warm_enabled, run_keep_warm_loop  # noqa: E402
@@ -201,11 +202,13 @@ _ui_sessions: dict[str, str] = {}
 async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     observability.configure()
     chart_cache = PatientChartCache.from_env()
+    audit_trail = AuditTrail.from_env()
     async with OpenEMRClient() as openemr_client:
         copilot = ClinicalCoPilot(openemr_client)
         app.state.openemr_client = openemr_client
         app.state.copilot = copilot
         app.state.chart_cache = chart_cache
+        app.state.audit_trail = audit_trail
         keep_warm_task: asyncio.Task[None] | None = None
         if keep_warm_enabled():
             keep_warm_task = asyncio.create_task(run_keep_warm_loop(openemr_client))
@@ -269,6 +272,40 @@ async def _verify_patient_exists(
             },
         )
         return await patient_exists(openemr_client, patient_id)
+
+
+def _ui_username_from_request(request: Request) -> str | None:
+    """Resolve the in-memory UI session username from a Bearer token, if any."""
+    auth = request.headers.get("authorization", "")
+    if not auth.lower().startswith("bearer "):
+        return None
+    token = auth[7:].strip()
+    return _ui_sessions.get(token)
+
+
+def _record_audit(
+    request: Request,
+    *,
+    event_type: str,
+    outcome: str,
+    username: str | None = None,
+    patient_id: str | None = None,
+    correlation_id: str | None = None,
+) -> None:
+    """Append one audit event; never raises — failures are logged and dropped."""
+    trail: AuditTrail | None = getattr(request.app.state, "audit_trail", None)
+    if trail is None:
+        return
+    try:
+        trail.append_sync(
+            username=username or _ui_username_from_request(request) or "unauthenticated",
+            event_type=event_type,  # type: ignore[arg-type]
+            outcome=outcome,
+            patient_id=patient_id,
+            correlation_id=correlation_id or _correlation_id_for(request),
+        )
+    except Exception:
+        logger.warning("audit_record_failed", extra={"event": "audit_record_failed"}, exc_info=True)
 
 
 # --------------------------------------------------------------------------
@@ -466,16 +503,62 @@ async def index() -> HTMLResponse:
 
 
 @app.post("/login", response_model=LoginResponse)
-async def login(payload: LoginRequest) -> LoginResponse | JSONResponse:
+async def login(request: Request, payload: LoginRequest) -> LoginResponse | JSONResponse:
     """MVP physician login — accepts configured credentials, returns an in-memory session token."""
+    correlation_id = _correlation_id_for(request)
     expected_user = os.environ.get("AGENT_UI_USERNAME", "admin")
     expected_pass = os.environ.get("AGENT_UI_PASSWORD", "ClinicalCoPilot2026!")
     if payload.username != expected_user or payload.password != expected_pass:
+        _record_audit(
+            request,
+            event_type="login",
+            outcome="failure",
+            username=payload.username,
+            correlation_id=correlation_id,
+        )
         return JSONResponse(status_code=401, content={"error": "Invalid credentials."})
     token = str(uuid.uuid4())
     _ui_sessions[token] = payload.username
     logger.info("ui_login", extra={"event": "ui_login", "username": payload.username})
+    _record_audit(
+        request,
+        event_type="login",
+        outcome="success",
+        username=payload.username,
+        correlation_id=correlation_id,
+    )
     return LoginResponse(token=token, username=payload.username)
+
+
+@app.post("/logout")
+async def logout(request: Request) -> JSONResponse:
+    """End the in-memory UI session and record a logout audit event."""
+    correlation_id = _correlation_id_for(request)
+    username = _ui_username_from_request(request)
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+        _ui_sessions.pop(token, None)
+    outcome = "success" if username else "failure"
+    _record_audit(
+        request,
+        event_type="logout",
+        outcome=outcome,
+        username=username or "unknown",
+        correlation_id=correlation_id,
+    )
+    if not username:
+        return JSONResponse(status_code=401, content={"error": "Not signed in."})
+    return JSONResponse(status_code=200, content={"status": "ok"})
+
+
+@app.get("/audit", response_model=list[AuditRecord])
+async def get_audit(request: Request) -> list[AuditRecord] | JSONResponse:
+    """Return append-only access audit records (newest first). Requires UI session."""
+    if _ui_username_from_request(request) is None:
+        return JSONResponse(status_code=401, content={"error": "Sign in required."})
+    trail: AuditTrail = request.app.state.audit_trail
+    return await trail.read_records()
 
 
 @app.get("/patients", response_model=list[PatientSummary])
@@ -642,6 +725,13 @@ async def ask(
                     exc_info=True,
                 )
                 trace.update(output={"patient_existence_check": "failed"})
+                _record_audit(
+                    request,
+                    event_type="patient_access",
+                    outcome="openemr_unreachable",
+                    patient_id=payload.patient_id,
+                    correlation_id=correlation_id,
+                )
                 return JSONResponse(
                     status_code=503,
                     content={
@@ -667,6 +757,13 @@ async def ask(
             # hallucination-rate dashboard by counting as a failure.
             trace.score_trace(name="verification_passed", value=1, data_type="BOOLEAN")
             trace.update(output={"patient_found": False})
+            _record_audit(
+                request,
+                event_type="patient_access",
+                outcome="patient_not_found",
+                patient_id=payload.patient_id,
+                correlation_id=correlation_id,
+            )
             return JSONResponse(
                 status_code=404,
                 content=AskResponse(
@@ -742,6 +839,13 @@ async def ask(
         # clinical content this whole module exists to keep out of Langfuse.
         trace.update(output={"answer_length": len(result["answer"]), "verification": verification_fields})
 
+    _record_audit(
+        request,
+        event_type="patient_access",
+        outcome="success",
+        patient_id=payload.patient_id,
+        correlation_id=correlation_id,
+    )
     return AskResponse(
         answer=result["answer"],
         tool_calls=result["tool_calls"],
@@ -840,6 +944,13 @@ async def chat(
                 "correlation_id": correlation_id,
             },
         )
+        _record_audit(
+            request,
+            event_type="access_refused",
+            outcome="refused",
+            patient_id=payload.patient_id,
+            correlation_id=correlation_id,
+        )
         return ChatResponse(
             answer=OTHER_PATIENT_REFUSAL_MESSAGE,
             verification=VerificationResult(passed=True, checked_claims=0),
@@ -877,6 +988,13 @@ async def chat(
                     exc_info=True,
                 )
                 trace.update(output={"patient_existence_check": "failed"})
+                _record_audit(
+                    request,
+                    event_type="patient_access",
+                    outcome="openemr_unreachable",
+                    patient_id=payload.patient_id,
+                    correlation_id=correlation_id,
+                )
                 return JSONResponse(
                     status_code=503,
                     content={
@@ -897,6 +1015,13 @@ async def chat(
             )
             trace.score_trace(name="verification_passed", value=1, data_type="BOOLEAN")
             trace.update(output={"patient_found": False})
+            _record_audit(
+                request,
+                event_type="patient_access",
+                outcome="patient_not_found",
+                patient_id=payload.patient_id,
+                correlation_id=correlation_id,
+            )
             return JSONResponse(
                 status_code=404,
                 content=ChatResponse(
@@ -961,6 +1086,13 @@ async def chat(
         trace.score_trace(name="verification_passed", value=1 if verification_result.passed else 0, data_type="BOOLEAN")
         trace.update(output={"answer_length": len(result["answer"]), "verification": verification_fields})
 
+    _record_audit(
+        request,
+        event_type="patient_access",
+        outcome="success",
+        patient_id=payload.patient_id,
+        correlation_id=correlation_id,
+    )
     return ChatResponse(
         answer=result["answer"],
         verification=verification_result,
