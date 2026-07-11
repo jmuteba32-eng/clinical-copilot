@@ -11,6 +11,7 @@ request that caused it."
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -47,7 +48,8 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 from agent import observability  # noqa: E402
 from agent.agent import ClinicalCoPilot  # noqa: E402
 from agent.cache import CachedPatientChart, PatientChartCache, fetch_patient_chart, refresh_chart_diagnosis  # noqa: E402
-from agent.openemr_client import OpenEMRClient, OpenEMRClientError  # noqa: E402
+from agent.keep_warm import keep_warm_enabled, run_keep_warm_loop  # noqa: E402
+from agent.openemr_client import OpenEMRClient, OpenEMRClientError, OpenEMRConnectionError  # noqa: E402
 from agent.list_patients import list_openemr_patients  # noqa: E402
 from agent.tools import patient_exists  # noqa: E402
 from agent.verification import VerificationResult, records_for_verification, verify  # noqa: E402
@@ -204,15 +206,27 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.openemr_client = openemr_client
         app.state.copilot = copilot
         app.state.chart_cache = chart_cache
+        keep_warm_task: asyncio.Task[None] | None = None
+        if keep_warm_enabled():
+            keep_warm_task = asyncio.create_task(run_keep_warm_loop(openemr_client))
         logger.info(
             "app_startup",
             extra={
                 "event": "app_startup",
                 "langfuse_enabled": observability.enabled(),
                 "chart_cache_enabled": chart_cache is not None,
+                "keep_warm_enabled": keep_warm_task is not None,
             },
         )
-        yield
+        try:
+            yield
+        finally:
+            if keep_warm_task is not None:
+                keep_warm_task.cancel()
+                try:
+                    await keep_warm_task
+                except asyncio.CancelledError:
+                    pass
     observability.shutdown()
     logger.info("app_shutdown", extra={"event": "app_shutdown"})
 
@@ -226,6 +240,35 @@ def get_openemr_client(request: Request) -> OpenEMRClient:
 
 def get_copilot(request: Request) -> ClinicalCoPilot:
     return request.app.state.copilot
+
+
+async def _verify_patient_exists(
+    openemr_client: OpenEMRClient,
+    patient_id: str,
+    *,
+    correlation_id: str,
+) -> bool:
+    """Run ``patient_exists`` with one automatic retry on cold-start timeout.
+
+    Railway's free tier lets OpenEMR sleep; the first FHIR call after idle
+    often times out while the container wakes. A single immediate retry
+    usually succeeds without making the physician wait through two full
+    request cycles manually.
+    """
+    try:
+        return await patient_exists(openemr_client, patient_id)
+    except OpenEMRConnectionError as exc:
+        if "Timed out" not in str(exc):
+            raise
+        logger.warning(
+            "patient_existence_check_timeout_retry",
+            extra={
+                "event": "patient_existence_check_timeout_retry",
+                "patient_id": patient_id,
+                "correlation_id": correlation_id,
+            },
+        )
+        return await patient_exists(openemr_client, patient_id)
 
 
 # --------------------------------------------------------------------------
@@ -575,7 +618,11 @@ async def ask(
         # never actually read, for a patient who may not exist at all.
         with observability.trace_patient_existence_check() as existence_span:
             try:
-                patient_found = await patient_exists(openemr_client, payload.patient_id)
+                patient_found = await _verify_patient_exists(
+                    openemr_client,
+                    payload.patient_id,
+                    correlation_id=correlation_id,
+                )
             except OpenEMRClientError as exc:
                 # OpenEMR being unreachable/denying auth is NOT the same
                 # fact as "this patient does not exist" -- collapsing the
@@ -813,7 +860,11 @@ async def chat(
     ) as trace:
         with observability.trace_patient_existence_check() as existence_span:
             try:
-                patient_found = await patient_exists(openemr_client, payload.patient_id)
+                patient_found = await _verify_patient_exists(
+                    openemr_client,
+                    payload.patient_id,
+                    correlation_id=correlation_id,
+                )
             except OpenEMRClientError:
                 existence_span.update(output={"patient_found": False})
                 logger.error(
