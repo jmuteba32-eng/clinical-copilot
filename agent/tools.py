@@ -42,24 +42,26 @@ from agent.schemas import (
 
 logger = logging.getLogger(__name__)
 
-# Bare ICD-10 strings (e.g. "H04.123") are not physician-facing recap text.
-# When OpenEMR leaves coding.display empty, map known demo codes to readable
-# names here; FHIR display/text still wins when present. Status and dates
-# on DiagnosisRecord stay for audit — not inlined in recap sentences.
+# Display convenience only: OpenEMR's FHIR Condition export sends ICD-10
+# coding.code but leaves coding.display empty and does not export the
+# problem-list Title (e.g. "Keratoconus") or Comments. This map supplies
+# human-readable labels for demo codes so recaps read cleanly. Sourcing is
+# unchanged — DiagnosisRecord.source_id still points at the real FHIR
+# Condition resource and citations verify against that id, not this label.
 _ICD10_LIKE: Final[re.Pattern[str]] = re.compile(r"^[A-Z][0-9]{2}(\.[A-Z0-9]+)?$")
 _ICD10_PHYSICIAN_NAMES: Final[dict[str, str]] = {
-    "H04.123": "Dry eye syndrome of bilateral lacrimal glands",
-    "H02.839": "Unspecified disorder of eyelid",
+    "H04.123": "Dry eye syndrome",
+    "H02.839": "Dermatochalasis",
+    "H18.603": "Keratoconus",
 }
 
 
 def _physician_readable_condition_name(code: str | None, display: str | None) -> str | None:
     """Plain-language condition name for physician-facing answers.
 
-    Priority: (1) FHIR display/text when it is human language, (2) optional
-    readable-name map for known demo codes, (3) the raw ICD code itself.
-    Never returns None when ``code`` is present — a coded Condition must not
-    be silently dropped because OpenEMR left ``coding.display`` empty.
+    Priority: (1) FHIR display/text when present, (2) demo code→name map
+    above (display label only — verification still uses source_id), (3) raw
+    ICD code. Never returns None when ``code`` is present.
     """
     if display is not None:
         stripped = display.strip()
