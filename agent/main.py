@@ -47,6 +47,7 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from agent import observability  # noqa: E402
 from agent.audit_trail import AuditRecord, AuditTrail  # noqa: E402
+from agent.baa_gate import BAA_REFUSAL_MESSAGE, baa_confirmed  # noqa: E402
 from agent.agent import ClinicalCoPilot  # noqa: E402
 from agent.cache import CachedPatientChart, PatientChartCache, fetch_patient_chart, refresh_chart_diagnosis  # noqa: E402
 from agent.keep_warm import keep_warm_enabled, run_keep_warm_loop  # noqa: E402
@@ -308,6 +309,33 @@ def _record_audit(
         logger.warning("audit_record_failed", extra={"event": "audit_record_failed"}, exc_info=True)
 
 
+def _is_baa_confirmed() -> bool:
+    """Safe read of admin BAA attestation — defaults to blocked on any failure."""
+    try:
+        return baa_confirmed()
+    except Exception:
+        logger.warning("baa_gate_read_failed", extra={"event": "baa_gate_read_failed"}, exc_info=True)
+        return False
+
+
+def _record_baa_gate_blocked(request: Request, *, patient_id: str, correlation_id: str) -> None:
+    _record_audit(
+        request,
+        event_type="baa_gate_blocked",
+        outcome="blocked",
+        patient_id=patient_id,
+        correlation_id=correlation_id,
+    )
+    logger.info(
+        "baa_gate_blocked",
+        extra={
+            "event": "baa_gate_blocked",
+            "patient_id": patient_id,
+            "correlation_id": correlation_id,
+        },
+    )
+
+
 # --------------------------------------------------------------------------
 # Correlation ID + request-summary middleware
 # --------------------------------------------------------------------------
@@ -561,6 +589,12 @@ async def get_audit(request: Request) -> list[AuditRecord] | JSONResponse:
     return await trail.read_records()
 
 
+@app.get("/baa-status")
+async def baa_status() -> dict[str, bool]:
+    """Whether an administrator has attested a BAA for the configured LLM provider."""
+    return {"baa_confirmed": _is_baa_confirmed()}
+
+
 @app.get("/patients", response_model=list[PatientSummary])
 async def list_patients(request: Request) -> list[PatientSummary] | JSONResponse:
     """Minimum-necessary patient list for the UI picker (id, age, sex only).
@@ -662,6 +696,13 @@ async def ask(
     openemr_client: OpenEMRClient = Depends(get_openemr_client),
 ) -> AskResponse | JSONResponse:
     correlation_id = _correlation_id_for(request)
+
+    if not _is_baa_confirmed():
+        _record_baa_gate_blocked(request, patient_id=payload.patient_id, correlation_id=correlation_id)
+        return JSONResponse(
+            status_code=403,
+            content={"error": BAA_REFUSAL_MESSAGE, "correlation_id": correlation_id},
+        )
 
     # Logs WHAT was asked about (patient_id -- an opaque FHIR resource ID)
     # and how long the question was, never the question's text: free-text
@@ -916,6 +957,19 @@ async def chat(
     openemr_client: OpenEMRClient = Depends(get_openemr_client),
 ) -> ChatResponse | JSONResponse:
     correlation_id = _correlation_id_for(request)
+
+    if not _is_baa_confirmed():
+        _record_baa_gate_blocked(request, patient_id=payload.patient_id, correlation_id=correlation_id)
+        return ChatResponse(
+            answer=BAA_REFUSAL_MESSAGE,
+            verification=VerificationResult(passed=True, checked_claims=0),
+            correlation_id=correlation_id,
+            updated_conversation_history=_updated_conversation_history(
+                payload.conversation_history,
+                payload.message,
+                BAA_REFUSAL_MESSAGE,
+            ),
+        )
 
     logger.info(
         "chat_request_received",

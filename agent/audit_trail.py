@@ -30,7 +30,7 @@ _DEFAULT_RELATIVE_PATH: Final[str] = "agent/audit_log.jsonl"
 _FALLBACK_FILENAME: Final[str] = "clinical-copilot-audit.jsonl"
 _VOLUME_SUBDIR_NAME: Final[str] = "clinical-copilot-audit"
 
-AuditEventType = Literal["login", "patient_access", "access_refused", "logout"]
+AuditEventType = Literal["login", "patient_access", "access_refused", "logout", "baa_gate_blocked"]
 
 
 class AuditRecord(BaseModel):

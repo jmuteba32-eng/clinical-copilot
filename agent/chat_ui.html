@@ -302,6 +302,16 @@
       border: 1px solid rgba(13, 148, 136, 0.25);
     }
 
+    .pill-baa {
+      font-size: 0.72rem;
+      color: var(--slate-500);
+      border: 1px solid var(--slate-200);
+      background: var(--white);
+    }
+
+    .pill-baa.ok { color: var(--success); border-color: rgba(5, 150, 105, 0.25); }
+    .pill-baa.warn { color: var(--warn); border-color: rgba(217, 119, 6, 0.25); }
+
     .topbar-actions { flex-shrink: 0; }
 
     /* ---- Audit log ---- */
@@ -378,6 +388,7 @@
     .event-pill.patient_access { background: var(--teal-50); color: var(--teal-700); }
     .event-pill.access_refused { background: #fef3c7; color: #b45309; }
     .event-pill.logout { background: var(--slate-100); color: var(--slate-700); }
+    .event-pill.baa_gate_blocked { background: #fee2e2; color: #b91c1c; }
 
     .outcome-ok { color: var(--success); font-weight: 600; }
     .outcome-warn { color: var(--warn); font-weight: 600; }
@@ -620,7 +631,7 @@
   <section id="view-picker" class="gate hidden">
     <div class="card picker-card">
       <h2>Select a patient</h2>
-      <p class="subtitle">Signed in as <strong id="picker-username"></strong>. Choose one chart — the session stays locked to that patient.</p>
+      <p class="subtitle">Signed in as <strong id="picker-username"></strong>. Choose one chart — the session stays locked to that patient. <span class="pill pill-baa" id="picker-baa">BAA: …</span></p>
       <label for="patient-search">Search</label>
       <input type="search" id="patient-search" placeholder="Search by patient name…" autocomplete="off" />
       <ul class="patient-list" id="patient-list"></ul>
@@ -643,6 +654,7 @@
         <div class="scope-pills">
           <span class="pill"><strong>Physician</strong> <span id="hdr-physician"></span></span>
           <span class="pill pill-active"><strong>Patient</strong> <span id="hdr-patient"></span></span>
+          <span class="pill pill-baa" id="chat-baa">BAA: …</span>
         </div>
       </div>
       <div class="topbar-actions">
@@ -671,6 +683,7 @@
         </div>
         <span class="topbar-title">Access Audit Log</span>
         <span class="pill"><strong>User</strong> <span id="audit-username"></span></span>
+        <span class="pill pill-baa" id="audit-baa">BAA: …</span>
       </div>
       <div class="topbar-actions">
         <button type="button" class="btn btn-ghost" id="audit-back-picker">Patients</button>
@@ -711,6 +724,7 @@
         patientLabel: null,
         conversationHistory: [],
         loading: false,
+        baaConfirmed: null,
       };
 
       const CITATION_RE = /\[([A-Za-z]+)\/([A-Za-z0-9\-]{1,64})\]/g;
@@ -903,8 +917,34 @@
           patient_access: "Patient Access",
           access_refused: "Access Refused",
           logout: "Logout",
+          baa_gate_blocked: "BAA Gate Blocked",
         };
         return labels[type] || type;
+      }
+
+      function renderBaaIndicator(confirmed) {
+        state.baaConfirmed = confirmed;
+        const label = confirmed ? "BAA: confirmed" : "BAA: not confirmed";
+        const cls = confirmed ? "pill pill-baa ok" : "pill pill-baa warn";
+        ["picker-baa", "chat-baa", "audit-baa"].forEach(function (id) {
+          const el = $(id);
+          if (!el) return;
+          el.textContent = label;
+          el.className = cls;
+        });
+      }
+
+      async function loadBaaStatus() {
+        try {
+          const { ok, data } = await apiGet("/baa-status");
+          if (ok && typeof data.baa_confirmed === "boolean") {
+            renderBaaIndicator(data.baa_confirmed);
+            return;
+          }
+        } catch {
+          /* non-fatal */
+        }
+        renderBaaIndicator(false);
       }
 
       function formatOutcome(outcome) {
@@ -1004,7 +1044,7 @@
           state.token = data.token;
           state.username = data.username;
           $("picker-username").textContent = state.username;
-          await loadPatients();
+          await Promise.all([loadPatients(), loadBaaStatus()]);
           showView("picker");
         } catch {
           errEl.textContent = "Could not reach the server. Try again.";
@@ -1139,6 +1179,7 @@
         this.style.height = "auto";
         this.style.height = Math.min(this.scrollHeight, 140) + "px";
       });
+      loadBaaStatus();
     })();
   </script>
 </body>
