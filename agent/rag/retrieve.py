@@ -23,6 +23,9 @@ from pathlib import Path
 import numpy as np
 from rank_bm25 import BM25Okapi
 
+import os
+_RAG_MODE = os.getenv("RAG_MODE", "hybrid").lower()
+
 _GUIDELINES_DIR = Path(__file__).resolve().parent / "guidelines"
 _EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 
@@ -83,27 +86,30 @@ def _minmax(x: np.ndarray) -> np.ndarray:
 
 @lru_cache(maxsize=1)
 def _build_index():
-    from sentence_transformers import SentenceTransformer  # lazy: keeps the offline gate fast
-
     chunks = _load_chunks()
     if not chunks:
         raise RuntimeError(f"No guideline text found in {_GUIDELINES_DIR}")
     bm25 = BM25Okapi([_tokenize(c.text) for c in chunks])
+    if _RAG_MODE == "bm25":
+        return chunks, bm25, None, None
+    from sentence_transformers import SentenceTransformer  # lazy: keeps the offline gate fast
     model = SentenceTransformer(_EMBED_MODEL_NAME)
     embeddings = model.encode([c.text for c in chunks], normalize_embeddings=True)
     return chunks, bm25, model, np.asarray(embeddings)
 
 
 def retrieve_evidence(query: str, k: int = 3) -> list[EvidenceHit]:
-    """Return top-k guideline chunks for a query, scored by hybrid BM25+dense."""
+    """Return top-k guideline chunks for a query, scored by hybrid BM25+dense (or BM25 only if RAG_MODE=bm25)."""
     chunks, bm25, model, embeddings = _build_index()
 
     bm25_scores = np.asarray(bm25.get_scores(_tokenize(query)), dtype=float)
 
-    q_emb = model.encode([query], normalize_embeddings=True)[0]
-    dense_scores = embeddings @ np.asarray(q_emb)  # cosine (both normalized)
-
-    combined = _minmax(bm25_scores) + _minmax(dense_scores)
+    if model is None or embeddings is None:
+        combined = bm25_scores
+    else:
+        q_emb = model.encode([query], normalize_embeddings=True)[0]
+        dense_scores = embeddings @ np.asarray(q_emb)
+        combined = _minmax(bm25_scores) + _minmax(dense_scores)
 
     top_idx = np.argsort(combined)[::-1][:k]
     return [EvidenceHit(chunk=chunks[i], score=float(combined[i])) for i in top_idx]
