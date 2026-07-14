@@ -29,6 +29,35 @@ _RAG_MODE = os.getenv("RAG_MODE", "hybrid").lower()
 _GUIDELINES_DIR = Path(__file__).resolve().parent / "guidelines"
 _EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
 
+# Only return evidence that clears this fraction of the top hit's score.
+# Page-level chunks make long boilerplate pages (appendices, reference lists)
+# score on generic words like "patient" and "care", which would otherwise be
+# presented to a physician as supporting evidence. A claim's citation must
+# actually support it: weak matches are dropped, not shown.
+_MIN_RELATIVE_SCORE = 0.4
+
+# UNUSED / documented negative result: filtering stopwords out of the query was
+# tried to stop boilerplate appendix pages from out-scoring clinical content.
+# It made ranking WORSE (the correct dermatochalasis page dropped from #1 to #2
+# and an unrelated page took the top slot), so it is not wired in. The real
+# cause is page-sized chunks; the fix is finer chunking or a reranker -- both
+# tracked as Phase-2 work in W2_ARCHITECTURE.md.
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for", "from",
+    "has", "have", "how", "i", "in", "is", "it", "its", "of", "on", "or", "s",
+    "should", "that", "the", "their", "there", "this", "to", "was", "what",
+    "when", "where", "which", "who", "why", "will", "with", "would",
+})
+
+
+def _tokenize_query(text: str) -> list[str]:
+    """Tokenize a QUERY, dropping stopwords so content words drive the score."""
+    tokens = [t.strip("?.,;:!()'\"") for t in text.lower().split()]
+    content = [t for t in tokens if t and t not in _STOPWORDS]
+    # If the query is nothing but stopwords, fall back to the raw tokens rather
+    # than scoring against an empty query.
+    return content or [t for t in tokens if t]
+
 
 @dataclass(frozen=True)
 class Chunk:
@@ -112,7 +141,12 @@ def retrieve_evidence(query: str, k: int = 3) -> list[EvidenceHit]:
         combined = _minmax(bm25_scores) + _minmax(dense_scores)
 
     top_idx = np.argsort(combined)[::-1][:k]
-    return [EvidenceHit(chunk=chunks[i], score=float(combined[i])) for i in top_idx]
+    hits = [EvidenceHit(chunk=chunks[i], score=float(combined[i])) for i in top_idx]
+
+    if not hits or hits[0].score <= 0:
+        return []
+    cutoff = hits[0].score * _MIN_RELATIVE_SCORE
+    return [h for h in hits if h.score >= cutoff]
 
 
 if __name__ == "__main__":
