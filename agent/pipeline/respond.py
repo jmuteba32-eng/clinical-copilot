@@ -45,53 +45,29 @@ def _intake_summary(intake: dict) -> str:
     )
 
 
-def respond(question: str) -> GroundedAnswer:
-    """Run the full pipeline for one question about the cached patient."""
-    scope = classify_scope(question)
-    if scope == "out_of_scope":
+def respond(question: str, correlation_id: str = "-") -> GroundedAnswer:
+    """Run the Week 2 supervisor/worker graph for one question.
+
+    Orchestration lives in agent/pipeline/graph.py (LangGraph): the supervisor
+    classifies scope and routes to the intake-extractor and evidence-retriever
+    workers, logging every handoff. This function adapts the graph's final state
+    into the GroundedAnswer contract, which is where the verified/citation
+    invariant is enforced.
+    """
+    from agent.pipeline.graph import build_graph
+
+    graph = build_graph()
+    final = graph.invoke({"question": question, "correlation_id": correlation_id})
+
+    if final.get("scope") == "out_of_scope":
         return answer_question(question, intake_summary="", evidence_citations=[], answer_text="")
 
-    intake = _load_intake()
-    summary = _intake_summary(intake)
-
-    # Retrieval query expansion: the physician's question often omits the
-    # condition ("do you recommend surgery?"), leaving keyword retrieval nothing
-    # clinical to match on. The patient's own extracted chief concern and
-    # symptoms are appended so every retrieval is grounded in what this patient
-    # actually has, not just how the question happened to be phrased.
-    retrieval_query = " ".join(
-        p for p in (question, intake.get("chief_concern"), intake.get("concern_symptoms")) if p
-    )
-    hits = retrieve_evidence(retrieval_query, k=3)
-    evidence_block = "\n\n".join(
-        f"[{i+1}] {h.chunk.guideline_file} p{h.chunk.page}: {h.chunk.text[:600]}"
-        for i, h in enumerate(hits)
-    )
-    citations = [Citation(**h.citation()) for h in hits]
-
-    prompt = (
-        "You are a clinical co-pilot preparing a physician for a follow-up visit. "
-        "Answer the question using ONLY the patient intake summary and the guideline "
-        "evidence below. Do not invent facts. If the evidence does not support an "
-        "answer, say so plainly. Cite guideline claims by their [n] marker.\n\n"
-        f"PATIENT INTAKE SUMMARY:\n{summary}\n\n"
-        f"GUIDELINE EVIDENCE:\n{evidence_block}\n\n"
-        f"PHYSICIAN QUESTION: {question}"
-    )
-
-    client = Anthropic()
-    resp = client.messages.create(
-        model=_MODEL,
-        max_tokens=700,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    answer_text = "".join(b.text for b in resp.content if b.type == "text").strip()
-
+    citations = [Citation(**c) for c in final.get("citations", [])]
     return answer_question(
         question=question,
-        intake_summary=summary,
+        intake_summary=final.get("intake_summary", ""),
         evidence_citations=citations,
-        answer_text=answer_text,
+        answer_text=final.get("answer_text", ""),
     )
 
 

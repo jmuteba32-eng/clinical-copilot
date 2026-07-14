@@ -736,7 +736,7 @@ async def respond_endpoint(
 
     from agent.pipeline.respond import respond as _run_pipeline
 
-    grounded = await asyncio.to_thread(_run_pipeline, payload.question)
+    grounded = await asyncio.to_thread(_run_pipeline, payload.question, correlation_id)
 
     return RespondResponse(
         scope=grounded.scope,
