@@ -1,0 +1,59 @@
+{
+  "source_id": "John_Doe-Intake-Form.pdf",
+  "source_type": "intake_form",
+  "source_date": null,
+  "source_page": 1,
+  "patient_name": "John Doe",
+  "date_of_birth": "03/09/2002",
+  "sex": "Male",
+  "race_ethnicity": "White",
+  "height": "6'0\"",
+  "weight": "198",
+  "chief_concern": "Dermatochalasis",
+  "concern_onset": "07/01/2026",
+  "concern_symptoms": "visual field obstruction where hanging skin blocks peripheral vision",
+  "medications": [
+    {
+      "name": "Oxymetazoline Drops (Upneeq)",
+      "dose": "3"
+    }
+  ],
+  "allergies": [
+    {
+      "allergen": "None",
+      "reaction": null
+    }
+  ],
+  "family_history": [
+    {
+      "relative": "Mother",
+      "condition": null,
+      "living": false,
+      "deceased_age": null
+    },
+    {
+      "relative": "Father",
+      "condition": null,
+      "living": false,
+      "deceased_age": null
+    },
+    {
+      "relative": "Sibling",
+      "condition": null,
+      "living": false,
+      "deceased_age": null
+    },
+    {
+      "relative": "Other",
+      "condition": null,
+      "living": false,
+      "deceased_age": null
+    },
+    {
+      "relative": "Other",
+      "condition": null,
+      "living": false,
+      "deceased_age": null
+    }
+  ]
+}
