@@ -60,21 +60,58 @@ This is a minimum-necessary decision, not an oversight. There is no clinical use
 
 ## 2. Worker graph
 
-**Current state: NOT IMPLEMENTED as a multi-agent graph.** See §7.
-
-The Week 2 pipeline is composed of plain functions:
+**Implemented with LangGraph** (`agent/pipeline/graph.py`). One supervisor, two workers.
 
 ```
-respond(question)                      agent/pipeline/respond.py
-  ├─ classify_scope(question)          agent/pipeline/answer.py
-  │    └─ out_of_scope -> SHORT-CIRCUIT: labeled refusal, no retrieval, no LLM call
-  ├─ _load_intake()                    cached JSON fixture (see §7)
-  ├─ retrieve_evidence(question)       agent/rag/retrieve.py
-  ├─ Claude call                       writes answer grounded in intake + evidence
-  └─ answer_question(...)              agent/pipeline/answer.py — applies the verified/citation invariant
+START -> supervisor -> refuse                      -> END   (out of scope)
+                    -> intake_extractor  -> supervisor
+                    -> evidence_retriever -> supervisor
+                    -> answer                      -> END
 ```
 
-This was a deliberate sequencing choice: build each capability as a testable plain function first, wrap in an orchestration framework last. The functions are written to be wrapped — `classify_scope`, `retrieve_evidence`, and the extraction step map 1:1 onto a supervisor and the two required workers (intake-extractor, evidence-retriever) with no rewrite. The wrapping is not done.
+**The supervisor is not a black box.** It owns every routing decision and workers always
+return to it — it decides what happens next by asking "what is still missing to answer
+safely?":
+
+| State | Supervisor decision |
+|---|---|
+| scope unknown | classify; `out_of_scope` → `refuse` |
+| scope `out_of_scope` | `refuse` (no worker runs at all) |
+| no intake facts | → `intake_extractor` |
+| no evidence | → `evidence_retriever` |
+| facts + evidence present | → `answer` |
+
+Routing is explicit and rule-based rather than model-chosen, so a run is reproducible
+and reviewable.
+
+### Logged handoffs
+
+Every decision and every worker return is (a) emitted as a structured log line on the
+`agent.graph` logger carrying the request's correlation ID, and (b) appended to
+`state["handoffs"]`, so the full path is reconstructable after the fact:
+
+```json
+{"event": "worker_handoff", "correlation_id": "4a0aa982-...",
+ "handoff_from": "supervisor", "handoff_to": "evidence_retriever",
+ "reason": "no guideline evidence yet"}
+```
+
+Handoff records carry **routing metadata only** — `from`, `to`, `reason`. No patient
+state, no question text. This is enforced by a gate test (`test_no_phi_in_logs.py`),
+because the handoff log is new PHI-leak surface introduced with the graph.
+
+### Workers
+
+| Node | Role | Backing code |
+|---|---|---|
+| `supervisor` | scope classification + all routing | `agent/pipeline/answer.py::classify_scope` |
+| `intake_extractor` | supplies the patient's extracted intake facts | `agent/pipeline/respond.py::_load_intake` |
+| `evidence_retriever` | supplies guideline evidence for the question | `agent/rag/retrieve.py::retrieve_evidence` |
+| `answer` | composes the grounded answer from facts + evidence | Anthropic call, prompt-constrained to the supplied evidence |
+
+`respond()` invokes the graph and adapts the final state into `GroundedAnswer`, which is
+where the verified/citation invariant is enforced. A critic agent is extension work per
+the PRD and is not built.
 
 ---
 
@@ -84,7 +121,32 @@ This was a deliberate sequencing choice: build each capability as a testable pla
 
 **Corpus:** three ophthalmology guideline PDFs — dermatochalasis (the test patient's condition), dry eye, keratoconus.
 
-**Chunking:** one chunk per page. Coarse, and the root cause of the limitation in §5.
+### Chunking
+
+**Paragraph-level**, 120–600 characters, tagged with the source page and an index within
+that page (`Chunk.index`) so citation IDs stay unique (`file#p5c2`).
+
+This replaced page-level chunking, which was the root cause of the ranking defect
+described in §5.1. Pages are split on blank lines; oversized paragraphs are hard-split;
+runt fragments are merged forward.
+
+### Query expansion
+
+Physician questions frequently omit the condition — *"do you recommend surgery?"* contains
+no clinical term at all, leaving keyword retrieval nothing to match on and returning noise.
+Before retrieval, the question is expanded with the patient's own extracted
+`chief_concern` and `concern_symptoms`:
+
+```
+"do you recommend surgery for John Doe?"
+  -> "do you recommend surgery for John Doe? Dermatochalasis visual field
+      obstruction where hanging skin blocks peripheral vision"
+```
+
+Retrieval is therefore grounded in what the patient actually has, not in how the question
+happened to be phrased. **The LLM prompt still receives the original question, unchanged** —
+expansion affects retrieval only. This is the PRD's "query rewriting" contextual-retrieval
+improvement.
 
 **Retrieval:** hybrid — BM25 (keyword) + local dense vectors (`all-MiniLM-L6-v2` via sentence-transformers), scores min-max normalized and summed.
 
@@ -149,40 +211,84 @@ error: failed to push some refs to 'https://labs.gauntletai.com/...'
 
 The commit stayed local. The stub was then reverted.
 
-### Rubric coverage — 21 cases, 4 of 5 categories
+### Rubric coverage — 24 cases, all 5 categories
 
-| Category | Status | File |
+| Category | Cases | File |
 |---|---|---|
-| `schema_valid` | ✅ 5 cases | `test_schema_valid.py` |
-| `citation_present` | ✅ 2 cases | `test_citation_present.py` |
+| `schema_valid` | 5 | `test_schema_valid.py` |
+| `citation_present` | 2 | `test_citation_present.py` |
 | `factually_consistent` | ✅ | `test_grounded_answer.py` |
 | `safe_refusal` | ✅ | `test_grounded_answer.py` |
-| `no_phi_in_logs` | ❌ **not implemented** | — |
-| **Intake extraction schema** | ✅ 4 cases | `test_intake_extraction_schema.py` |
+| `no_phi_in_logs` | 3 | `test_no_phi_in_logs.py` |
+| Intake extraction schema | 4 | `test_intake_extraction_schema.py` |
 
-**21 cases, not the required 50.** See §7.
+**24 cases, not the required 50.** All five boolean categories are covered; the shortfall
+is case count, not category coverage.
 
 ---
 
 ## 5. Known limitations
 
-### 5.1 Retrieval returns irrelevant citations
+### 5.1 Retrieval quality — FIXED
 
-For the query *"What does the guideline recommend for this patient's dermatochalasis?"*, BM25 returns:
+**This section previously documented a live defect. It has been fixed; the record is kept
+because the fix and the failed attempt before it are both part of the design rationale.**
+
+#### The original defect
+
+With page-level chunks, the query *"What does the guideline recommend for this patient's
+dermatochalasis?"* returned:
 
 ```
-[10.808] dermatochalasis_guideline.pdf p5   ← correct
-[10.356] keratoconus_guideline.pdf p33      ← "APPENDIX 1. QUALITY OF OPHTHALMIC CARE" boilerplate
-[10.341] dry_eye_guideline.pdf p31          ← the same boilerplate, different document
+[10.808] dermatochalasis_guideline.pdf p5   <- correct
+[10.356] keratoconus_guideline.pdf p33      <- "APPENDIX 1. QUALITY OF OPHTHALMIC CARE"
+[10.341] dry_eye_guideline.pdf p31          <- the same boilerplate, other document
 ```
 
-**Cause:** page-sized chunks. A full page of boilerplate offers dozens of common words ("patient", "care", "quality") to match, so long non-clinical pages score within 4% of the genuinely relevant page. A relative-score threshold (`_MIN_RELATIVE_SCORE = 0.4`) is in place but cannot separate hits this close together.
+Irrelevant boilerplate scored within 4% of the correct page. A ~2000-character page offers
+BM25 dozens of common words ("patient", "care", "quality") to match. The answer model
+reliably discarded the junk — *"[2] and [3] are not relevant to this patient's condition"* —
+but the citations panel still surfaced it to the physician, and the Verified badge sat above
+an answer stating its own sources were irrelevant. **That is the Week 1 "Verified · 0 sources"
+defect in a new form**, and it was the reason to fix rather than document it.
 
-**Impact:** the answer model reliably identifies and discards the irrelevant chunks — deployed output says *"[2] and [3] are not relevant to this patient's condition"* — so answers stay correct. But the citations array still surfaces them, which means a physician-facing sources panel would list an unrelated disease's appendix. **This is a real defect, not cosmetic.**
+#### Failed attempt (kept as a documented negative result)
 
-**Documented negative result:** query-side stopword filtering was tried and **measured as worse** — the correct dermatochalasis page dropped from #1 to #2 and an unrelated dry-eye page took the top slot (scores collapsed 10.8 → 4.6). It was reverted. The code remains in `retrieve.py`, unwired, with a comment recording the result.
+Filtering stopwords out of the query was tried first. It was **measured as worse**: the
+correct dermatochalasis page dropped from #1 to #2, an unrelated dry-eye page took the top
+slot, and scores collapsed from 10.8 to 4.6. Reverted. `_STOPWORDS` and `_tokenize_query()`
+remain in `retrieve.py`, unwired, with a comment recording the result.
 
-**Real fix:** paragraph-level chunking, or a reranker. Both Phase 2.
+The attempt failed because it treated a symptom (generic words matching) rather than the
+cause (chunks large enough for generic words to dominate).
+
+#### The fix
+
+Two changes, together:
+
+1. **Paragraph-level chunking** (§3) — term frequency means something again.
+2. **Query expansion** (§3) — every retrieval carries the patient's condition.
+
+Result for the same class of query:
+
+```
+[17.202] dermatochalasis_guideline.pdf p6
+[15.776] dermatochalasis_guideline.pdf p5
+[14.030] dermatochalasis_guideline.pdf p5
+```
+
+All three from the correct guideline, cleanly separated from noise instead of 4% margins.
+Deployed output now quotes real clinical text — *"A common functional indication for upper
+eyelid blepharoplasty is dermatochalasis, a superior visual field defect secondary to
+redundant upper eyelid tissue..."* — rather than a page header.
+
+A relative-score floor (`_MIN_RELATIVE_SCORE = 0.4`) drops weak matches. It was ineffective
+against the old 4% margins and is meaningful now that scores separate.
+
+**Residual limitation:** retrieval quality has been validated against one patient scenario
+(dermatochalasis) and a three-document corpus. It is not known how it behaves at larger
+corpus sizes or for conditions whose guideline vocabulary overlaps more heavily. A reranker
+remains the principled next step.
 
 ### 5.2 Audit log path fallback
 
@@ -207,12 +313,12 @@ The audit log is not landing on the mounted Railway volume, so **it does not sur
 
 | Feedback | Status |
 |---|---|
-| *"2+2" and "Testing" display Verified with zero sources* | ✅ **Fixed structurally.** `GroundedAnswer.verified` is derived in `model_post_init` from `scope == "in_scope" and len(citations) > 0`. It cannot be set to True by a caller. A "Verified · 0 sources" answer is **not constructible.** |
-| *Questions outside the patient chart should be rejected before the model runs* | ✅ **Fixed.** `classify_scope()` short-circuits off-scope questions to a labeled refusal with `refusal_reason` — no retrieval, no LLM call. Verified live in production. |
-| *BAA flag should not be presented as proof of HIPAA compliance* | ✅ Language corrected throughout this document and the demo. |
-| *Audit log should capture denial reason* | ❌ Not done. `refusal_reason` exists on the answer object but is not yet written to the audit trail. |
-| *Eval report predates the final code — no current run proves it passes* | ✅ **Fixed structurally.** The gate runs on every push; stale evidence cannot accumulate silently. |
-| *Tests don't cover the HTTP authorization boundary on /ask and /chat* | ❌ Not done. |
+| *"2+2" and "Testing" display Verified with zero sources* | ✅ Fixed structurally. `GroundedAnswer.verified` is derived in `model_post_init` from `scope == "in_scope" and len(citations) > 0`. Not settable by a caller. Verified live in the deployed UI. |
+| *Off-chart questions should be rejected before the model runs* | ✅ Fixed. The supervisor classifies scope first and routes to `refuse` — no worker runs, no retrieval, no LLM call. |
+| *BAA flag is not proof of HIPAA compliance* | ✅ Language corrected in this document and the demo. |
+| *Audit log should capture denial reason* | ❌ Not done (§7.7). |
+| *Eval report predates the final code* | ✅ Fixed structurally — the gate runs on every push; stale evidence cannot accumulate silently. |
+| *No tests on the HTTP authorization boundary* | ❌ Not done (§7.8). |
 
 **The theme of that feedback — "make sure your evidence matches your claims" — is the organizing principle of this document.** Where a requirement is unmet, it is listed as unmet.
 
@@ -220,17 +326,35 @@ The audit log is not landing on the mounted Railway volume, so **it does not sur
 
 ## 7. Not implemented (required by the PRD)
 
-Stated plainly rather than buried:
+Stated plainly rather than buried.
 
-1. **Supervisor + 2 workers.** Required core deliverable. The pipeline is plain functions; there is no LangGraph/Agents-SDK graph and no logged handoffs. The functions map 1:1 onto the required roles and are structured to be wrapped.
-2. **FHIR persistence.** Extracted intake facts are **not** written back to OpenEMR as FHIR resources, and the source document is not stored in OpenEMR. `respond()` reads a cached JSON fixture (`agent/pipeline/john_doe_intake.json`) produced by one real extraction run. The loader is a deliberate seam: swapping it for an OpenEMR read changes nothing downstream.
-3. **Lab PDF (second document type).** Only the intake form is wired. A lab report fixture exists but has no schema or extraction path.
-4. **Visual PDF bounding-box overlay.** Required by the citation contract. Not built. `source_page` exists as the anchor it would hang from.
-5. **50-case golden set.** 21 cases exist.
-6. **`no_phi_in_logs` rubric.** The 5th category is unimplemented.
-7. **Cohere rerank.** See §3.
-8. **Click-to-source UI.** `/respond` returns citation JSON; nothing renders it.
-9. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2 dependencies, per-worker tracing spans, dashboards/alerts, Postman collection, backup/RPO/RTO, baseline CPU/memory profiles: not addressed.
+1. **FHIR persistence.** Extracted intake facts are **not** written back to OpenEMR as FHIR
+   resources, and the source document is not stored in OpenEMR. The `intake_extractor`
+   worker reads a cached JSON fixture (`agent/pipeline/john_doe_intake.json`) produced by a
+   real extraction run. The loader is a deliberate seam: swapping it for an OpenEMR read
+   changes nothing else in the graph.
+2. **Lab PDF (second document type).** Only the intake form is wired. A lab report fixture
+   exists but has no schema or extraction path.
+3. **Visual PDF bounding-box overlay.** Required by the citation contract. Not built.
+   `source_page` and `Chunk.index` exist as the anchors it would hang from. Click-to-source
+   snippets **are** implemented in the UI (expandable citation quotes); the box overlay is
+   the missing half.
+4. **50-case golden set.** 24 cases exist, covering all five categories.
+5. **Cohere rerank.** Hybrid BM25 + dense is offered as the PRD's "or equivalent";
+   production runs BM25-only (§3, `RAG_MODE`). A reranker is not wired in.
+6. **Patient scoping on the Week 2 path.** `/respond` does not take a `patient_id` — it
+   answers about the cached intake fixture. The UI's patient selector is therefore
+   **cosmetic in Week 2 mode**. This is a real wart, and it resolves naturally when FHIR
+   persistence lands (item 1).
+7. **Audit-log denial reason.** `refusal_reason` exists on the answer object and is returned
+   to the client, but is not yet written to the audit trail (Week 1 grader feedback).
+8. **HTTP authorization-boundary tests** for `/ask`, `/chat`, `/respond` — a known gap
+   carried from Week 1.
+9. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
+   dependencies (vector index, reranker reachability), per-worker tracing spans, dashboards
+   and alerts, Postman/Bruno collection, backup/RPO/RTO, baseline CPU/memory profiles: not
+   addressed.
+10. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
 
 ---
 
