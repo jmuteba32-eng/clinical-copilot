@@ -54,7 +54,15 @@ def respond(question: str) -> GroundedAnswer:
     intake = _load_intake()
     summary = _intake_summary(intake)
 
-    hits = retrieve_evidence(question, k=3)
+    # Retrieval query expansion: the physician's question often omits the
+    # condition ("do you recommend surgery?"), leaving keyword retrieval nothing
+    # clinical to match on. The patient's own extracted chief concern and
+    # symptoms are appended so every retrieval is grounded in what this patient
+    # actually has, not just how the question happened to be phrased.
+    retrieval_query = " ".join(
+        p for p in (question, intake.get("chief_concern"), intake.get("concern_symptoms")) if p
+    )
+    hits = retrieve_evidence(retrieval_query, k=3)
     evidence_block = "\n\n".join(
         f"[{i+1}] {h.chunk.guideline_file} p{h.chunk.page}: {h.chunk.text[:600]}"
         for i, h in enumerate(hits)

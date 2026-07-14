@@ -19,6 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import re
 
 import numpy as np
 from rank_bm25 import BM25Okapi
@@ -28,6 +29,14 @@ _RAG_MODE = os.getenv("RAG_MODE", "hybrid").lower()
 
 _GUIDELINES_DIR = Path(__file__).resolve().parent / "guidelines"
 _EMBED_MODEL_NAME = "all-MiniLM-L6-v2"
+
+# Paragraph-level chunking. Page-sized chunks were the root cause of the ranking
+# defect: a ~2000-character page gives BM25 dozens of common words to match, so
+# a "QUALITY OF OPHTHALMIC CARE" appendix scored within 4% of the correct
+# dermatochalasis page. Smaller chunks make term frequency meaningful again, and
+# make quote_or_value an actual supporting quote instead of the page's header.
+_MIN_CHUNK_CHARS = 120
+_MAX_CHUNK_CHARS = 600
 
 # Only return evidence that clears this fraction of the top hit's score.
 # Page-level chunks make long boilerplate pages (appendices, reference lists)
@@ -65,6 +74,7 @@ class Chunk:
     guideline_file: str
     page: int  # 1-based
     text: str
+    index: int = 0  # nth chunk within this page; disambiguates citation ids
 
 
 @dataclass(frozen=True)
@@ -79,14 +89,46 @@ class EvidenceHit:
             "source_type": "guideline",
             "source_id": self.chunk.guideline_file,
             "page_or_section": f"page {self.chunk.page}",
-            "field_or_chunk_id": f"{self.chunk.guideline_file}#p{self.chunk.page}",
+            "field_or_chunk_id": f"{self.chunk.guideline_file}#p{self.chunk.page}c{self.chunk.index}",
             "quote_or_value": self.chunk.text[:300],
         }
 
 
+def _split_page_text(text: str) -> list[str]:
+    """Split one page's text into paragraph-sized chunks."""
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    chunks: list[str] = []
+    buf = ""
+    for p in paras:
+        p = re.sub(r"\s+", " ", p)
+        if len(p) > _MAX_CHUNK_CHARS:
+            if buf:
+                chunks.append(buf)
+                buf = ""
+            for i in range(0, len(p), _MAX_CHUNK_CHARS):
+                chunks.append(p[i:i + _MAX_CHUNK_CHARS])
+            continue
+        if not buf:
+            buf = p
+        elif len(buf) + 1 + len(p) <= _MAX_CHUNK_CHARS:
+            buf = buf + " " + p
+        else:
+            chunks.append(buf)
+            buf = p
+    if buf:
+        chunks.append(buf)
+
+    merged: list[str] = []
+    for c in chunks:
+        if merged and len(c) < _MIN_CHUNK_CHARS and len(merged[-1]) + len(c) + 1 <= _MAX_CHUNK_CHARS:
+            merged[-1] = merged[-1] + " " + c
+        else:
+            merged.append(c)
+    return [c for c in merged if len(c) >= 40]
+
+
 def _load_chunks() -> list[Chunk]:
-    """One chunk per page of each guideline PDF. Page-level chunking is
-    deliberately coarse for the thin slice; finer chunking is a Phase-2 knob."""
+    """Paragraph-level chunks from each guideline PDF, tagged with their page."""
     import fitz  # pymupdf — lazy: gate imports only need Chunk/EvidenceHit/_tokenize
 
     chunks: list[Chunk] = []
@@ -95,8 +137,10 @@ def _load_chunks() -> list[Chunk]:
         try:
             for i in range(doc.page_count):
                 text = doc.load_page(i).get_text().strip()
-                if text:
-                    chunks.append(Chunk(guideline_file=pdf.name, page=i + 1, text=text))
+                if not text:
+                    continue
+                for j, piece in enumerate(_split_page_text(text)):
+                    chunks.append(Chunk(guideline_file=pdf.name, page=i + 1, text=piece, index=j))
         finally:
             doc.close()
     return chunks

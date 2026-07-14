@@ -462,6 +462,13 @@
       color: #991b1b;
     }
 
+    /* Week 2: click-to-source citation snippets under a grounded answer. */
+    .w2-cites { margin-top: 10px; border-top: 1px solid rgba(0,0,0,0.08); padding-top: 8px; }
+    .w2-cite { font-size: 12px; margin: 4px 0; }
+    .w2-cite summary { cursor: pointer; opacity: 0.75; }
+    .w2-cite p { margin: 6px 0 8px 12px; padding-left: 8px; border-left: 2px solid rgba(0,0,0,0.15); opacity: 0.8; white-space: pre-wrap; }
+    .w2-refusal { font-size: 12px; opacity: 0.6; margin-top: 8px; font-style: italic; }
+
     /* Source citations: present for trust/verification, visually quiet in the recap. */
     .answer-line {
       margin: 0 0 0.65em;
@@ -862,6 +869,59 @@
         scrollMessages();
       }
 
+      // Week 2: renders a GroundedAnswer from POST /respond.
+      // The badge is DERIVED from the response's own verified flag and its
+      // citations array -- not counted separately out of the answer text, which
+      // is how Week 1 could show "Verified - 0 sources". Verified here means the
+      // server said in_scope AND returned at least one citation.
+      function appendGroundedBubble(data) {
+        const row = document.createElement("div");
+        row.className = "msg-row agent";
+        const cites = data.citations || [];
+        const verified = !!data.verified;
+        const outOfScope = data.scope === "out_of_scope";
+
+        let badgeClass, badgeLabel;
+        if (outOfScope) {
+          badgeClass = "warn";
+          badgeLabel = "Out of clinical scope";
+        } else if (verified) {
+          badgeClass = "ok";
+          badgeLabel = "Verified \u00b7 " + cites.length + " source" + (cites.length === 1 ? "" : "s");
+        } else {
+          badgeClass = "warn";
+          badgeLabel = "Unverified \u00b7 0 sources";
+        }
+
+        let citeHtml = "";
+        if (cites.length) {
+          citeHtml = '<div class="w2-cites">';
+          cites.forEach(function (c, i) {
+            citeHtml +=
+              '<details class="w2-cite">' +
+              "<summary>[" + (i + 1) + "] " + escapeHtml(c.source_id || "") +
+              " \u2014 " + escapeHtml(c.page_or_section || "") + "</summary>" +
+              "<p>" + escapeHtml(c.quote_or_value || "") + "</p>" +
+              "</details>";
+          });
+          citeHtml += "</div>";
+        }
+
+        let refusalHtml = "";
+        if (data.refusal_reason) {
+          refusalHtml = '<p class="w2-refusal">' + escapeHtml(data.refusal_reason) + "</p>";
+        }
+
+        row.innerHTML =
+          '<span class="msg-label">Co-Pilot</span>' +
+          '<div class="bubble agent">' + formatAnswerHtml(data.answer || "") + refusalHtml + citeHtml + "</div>" +
+          '<span class="verify-badge ' + badgeClass + '">' +
+          '<span class="verify-dot"></span>' + badgeLabel +
+          "</span>";
+        $("messages").appendChild(row);
+        scrollMessages();
+      }
+
       function appendAgentBubble(text, verification) {
         const row = document.createElement("div");
         row.className = "msg-row agent";
@@ -1137,10 +1197,8 @@
 
         setLoading(true);
         try {
-          const { ok, status, data } = await apiPost("/chat", {
-            patient_id: state.patientId,
-            message: text,
-            conversation_history: state.conversationHistory,
+          const { ok, status, data } = await apiPost("/respond", {
+            question: text,
           });
 
           if (!ok) {
@@ -1149,8 +1207,7 @@
             return;
           }
 
-          state.conversationHistory = data.updated_conversation_history || [];
-          appendAgentBubble(data.answer, data.verification);
+          appendGroundedBubble(data);
         } catch {
           appendErrorBubble("Network error — could not reach the agent. Please try again.");
         } finally {
