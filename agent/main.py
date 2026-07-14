@@ -467,6 +467,27 @@ class AskResponse(BaseModel):
     correlation_id: str
 
 
+class RespondRequest(BaseModel):
+    question: str = Field(..., min_length=1, description="The physician's natural-language question. Routed through the Week 2 grounded-answer pipeline (scope classification, hybrid RAG retrieval, cited answer).")
+
+
+class RespondCitation(BaseModel):
+    source_type: str
+    source_id: str
+    page_or_section: str | None = None
+    field_or_chunk_id: str | None = None
+    quote_or_value: str | None = None
+
+
+class RespondResponse(BaseModel):
+    scope: str
+    verified: bool
+    answer: str
+    refusal_reason: str | None = None
+    citations: list[RespondCitation] = Field(default_factory=list)
+    correlation_id: str
+
+
 class ChatTurn(BaseModel):
     role: str = Field(..., pattern=r"^(user|assistant)$", description="Prior turn role in this session.")
     content: str = Field(..., min_length=1, description="Prior turn text (published Q&A only, not tool blocks).")
@@ -686,6 +707,45 @@ async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_op
         return JSONResponse(status_code=503, content={"status": "not_ready", "failures": failures})
 
     return JSONResponse(status_code=200, content={"status": "ready"})
+
+
+@app.post("/respond", response_model=RespondResponse)
+async def respond_endpoint(
+    request: Request,
+    payload: RespondRequest,
+) -> RespondResponse | JSONResponse:
+    """Week 2 grounded-answer pipeline: scope -> hybrid RAG -> cited answer.
+
+    Reuses the Week 1 BAA gate and correlation-ID/PHI-safe logging. The
+    question text is never logged (it can restate chart specifics); only
+    metadata is recorded, exactly as /ask does.
+    """
+    correlation_id = _correlation_id_for(request)
+
+    if not _is_baa_confirmed():
+        _record_baa_gate_blocked(request, patient_id="week2-respond", correlation_id=correlation_id)
+        return JSONResponse(
+            status_code=403,
+            content={"error": BAA_REFUSAL_MESSAGE, "correlation_id": correlation_id},
+        )
+
+    logger.info(
+        "respond_request",
+        extra={"event": "respond_request", "correlation_id": correlation_id, "question_length": len(payload.question)},
+    )
+
+    from agent.pipeline.respond import respond as _run_pipeline
+
+    grounded = await asyncio.to_thread(_run_pipeline, payload.question)
+
+    return RespondResponse(
+        scope=grounded.scope,
+        verified=grounded.verified,
+        answer=grounded.answer_text,
+        refusal_reason=grounded.refusal_reason,
+        citations=[RespondCitation(**c.model_dump()) for c in grounded.citations],
+        correlation_id=correlation_id,
+    )
 
 
 @app.post("/ask", response_model=AskResponse)
