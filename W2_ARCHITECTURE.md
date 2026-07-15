@@ -25,6 +25,27 @@ Week 2 **reuses** Week 1's BAA gate, correlation-ID middleware, and PHI-safe log
 
 ## 1. Document ingestion flow
 
+**Two document types are implemented:** the patient intake form (`extract_intake_form`) and
+the lab report (`extract_lab_report`). Both follow the identical contract described below —
+render every page, one vision call, strict Pydantic validation or hard failure. The lab
+schema (`LabResult` / `LabReportExtraction`) carries every PRD-required field: test name,
+value, unit, reference range, collection date, abnormal flag, and source citation.
+
+Two lab-specific decisions worth naming:
+
+- **`abnormal_flag` is a closed set (`High` / `Low` / `Borderline` / `None`), not a boolean.**
+  It is transcribed from the flag the lab itself printed, never computed from value vs
+  reference range. Flattening it to `abnormal=True` would destroy the direction of the
+  abnormality, which is the clinically meaningful part; computing it ourselves would mean
+  silently disagreeing with the issuing lab — a fabricated claim.
+- **Result values stay strings.** Real reports carry `<0.01`, `150000`, and `Not Detected`.
+  Coercing to float would either crash or invent precision.
+
+The lab fixture (`agent/ingestion/test_docs/CBC_Lab_Report.pdf`) is a synthetic CBC whose
+patient is **Yash M. Patel, not John Doe**. The schema documents that a report's patient is
+whoever the document says it is; reconciling report identity against chart identity is not
+done (see §7).
+
 ```
 intake form PDF
    └─> pymupdf renders every page -> PNG @150 DPI
@@ -211,19 +232,25 @@ error: failed to push some refs to 'https://labs.gauntletai.com/...'
 
 The commit stayed local. The stub was then reverted.
 
-### Rubric coverage — 24 cases, all 5 categories
+### Rubric coverage — 50 cases, all 5 categories
 
 | Category | Cases | File |
 |---|---|---|
 | `schema_valid` | 5 | `test_schema_valid.py` |
 | `citation_present` | 2 | `test_citation_present.py` |
-| `factually_consistent` | ✅ | `test_grounded_answer.py` |
-| `safe_refusal` | ✅ | `test_grounded_answer.py` |
+| `factually_consistent` | ✅ | `test_grounded_answer.py`, `test_golden_set.py` |
+| `safe_refusal` | ✅ | `test_grounded_answer.py`, `test_golden_set.py` |
 | `no_phi_in_logs` | 3 | `test_no_phi_in_logs.py` |
-| Intake extraction schema | 4 | `test_intake_extraction_schema.py` |
+| intake extraction schema | 4 | `test_intake_extraction_schema.py` |
+| lab extraction schema | 8 | `test_lab_extraction_schema.py` |
+| golden set (9 off-scope + 9 in-scope) | 18 | `test_golden_set.py` |
 
-**24 cases, not the required 50.** All five boolean categories are covered; the shortfall
-is case count, not category coverage.
+**50 cases, all five boolean categories.** Runs offline in ~0.8 s and spends nothing.
+
+The golden set earned its keep immediately: it surfaced a real bug on first run. The scope
+classifier matched the pronoun `"he "` as a substring, which matches inside `"the"` — so
+questions were being classified in-scope for the wrong reason. Fixed with word-boundary
+regex (`\b(he|his|she|her|them)\b`).
 
 ---
 
@@ -316,9 +343,9 @@ The audit log is not landing on the mounted Railway volume, so **it does not sur
 | *"2+2" and "Testing" display Verified with zero sources* | ✅ Fixed structurally. `GroundedAnswer.verified` is derived in `model_post_init` from `scope == "in_scope" and len(citations) > 0`. Not settable by a caller. Verified live in the deployed UI. |
 | *Off-chart questions should be rejected before the model runs* | ✅ Fixed. The supervisor classifies scope first and routes to `refuse` — no worker runs, no retrieval, no LLM call. |
 | *BAA flag is not proof of HIPAA compliance* | ✅ Language corrected in this document and the demo. |
-| *Audit log should capture denial reason* | ❌ Not done (§7.7). |
+| *Audit log should capture denial reason* | ❌ Not done (§7.5). |
 | *Eval report predates the final code* | ✅ Fixed structurally — the gate runs on every push; stale evidence cannot accumulate silently. |
-| *No tests on the HTTP authorization boundary* | ❌ Not done (§7.8). |
+| *No tests on the HTTP authorization boundary* | ❌ Not done (§7.6). |
 
 **The theme of that feedback — "make sure your evidence matches your claims" — is the organizing principle of this document.** Where a requirement is unmet, it is listed as unmet.
 
@@ -333,28 +360,28 @@ Stated plainly rather than buried.
    worker reads a cached JSON fixture (`agent/pipeline/john_doe_intake.json`) produced by a
    real extraction run. The loader is a deliberate seam: swapping it for an OpenEMR read
    changes nothing else in the graph.
-2. **Lab PDF (second document type).** Only the intake form is wired. A lab report fixture
-   exists but has no schema or extraction path.
-3. **Visual PDF bounding-box overlay.** Required by the citation contract. Not built.
+2. **Visual PDF bounding-box overlay.** Required by the citation contract. Not built.
    `source_page` and `Chunk.index` exist as the anchors it would hang from. Click-to-source
    snippets **are** implemented in the UI (expandable citation quotes); the box overlay is
    the missing half.
-4. **50-case golden set.** 24 cases exist, covering all five categories.
-5. **Cohere rerank.** Hybrid BM25 + dense is offered as the PRD's "or equivalent";
+3. **Cohere rerank.** Hybrid BM25 + dense is offered as the PRD's "or equivalent";
    production runs BM25-only (§3, `RAG_MODE`). A reranker is not wired in.
-6. **Patient scoping on the Week 2 path.** `/respond` does not take a `patient_id` — it
+4. **Patient scoping on the Week 2 path.** `/respond` does not take a `patient_id` — it
    answers about the cached intake fixture. The UI's patient selector is therefore
    **cosmetic in Week 2 mode**. This is a real wart, and it resolves naturally when FHIR
    persistence lands (item 1).
-7. **Audit-log denial reason.** `refusal_reason` exists on the answer object and is returned
+5. **Audit-log denial reason.** `refusal_reason` exists on the answer object and is returned
    to the client, but is not yet written to the audit trail (Week 1 grader feedback).
-8. **HTTP authorization-boundary tests** for `/ask`, `/chat`, `/respond` — a known gap
+6. **HTTP authorization-boundary tests** for `/ask`, `/chat`, `/respond` — a known gap
    carried from Week 1.
-9. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
+7. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
    dependencies (vector index, reranker reachability), per-worker tracing spans, dashboards
    and alerts, Postman/Bruno collection, backup/RPO/RTO, baseline CPU/memory profiles: not
    addressed.
-10. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
+8. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
+9. **Lab-to-chart identity reconciliation.** `extract_lab_report` transcribes whichever patient
+   the report names. Nothing checks that a report's patient matches the session's patient. In a
+   real deployment that check is mandatory before a lab value is shown next to a chart.
 
 ---
 

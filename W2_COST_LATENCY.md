@@ -179,8 +179,9 @@ is reading the document once, not answering questions about it. Two levers follo
 
 - Cohere rerank (not implemented — see architecture §7)
 - FHIR write-back to OpenEMR (not implemented)
-- Lab PDF ingestion (not implemented) — a second document type would roughly double
-  per-patient ingestion cost
+- **Lab PDF ingestion is implemented but not included in the projection above.** A second
+  document per patient would roughly double per-patient ingestion cost (~$0.058 → ~$0.116),
+  taking the 1,000-patient/mo projection from ~$102 to ~$160.
 - Prompt caching (not enabled)
 - Production-tier Railway hosting
 

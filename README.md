@@ -106,10 +106,10 @@ Week 2 adds two capabilities to the Week 1 agent: it can **read clinical documen
 | | Week 1 (baseline, still present) | Week 2 (new) |
 |---|---|---|
 | Endpoint | `POST /chat`, `POST /ask` | `POST /respond` |
-| Data source | structured OpenEMR/FHIR resources | intake-form PDF (VLM-extracted) + guideline corpus |
+| Data source | structured OpenEMR/FHIR resources | intake-form PDF + lab report PDF (both VLM-extracted to strict schemas) + guideline corpus |
 | Orchestration | single agent + tool layer | LangGraph: supervisor + 2 workers, logged handoffs |
 | UI | chat → `/chat` | **chat → `/respond`** (grounded answers, click-to-source citations) |
-| Evals | `agent/evals/` — live suite, ~7 min, spends tokens | `agent/gate/` — 24 offline cases, 0.4 s, $0.00, **blocks pushes** |
+| Evals | `agent/evals/` — live suite, ~7 min, spends tokens | `agent/gate/` — 50 offline cases, 0.8 s, $0.00, **blocks pushes** |
 
 **The UI now calls `/respond`.** Week 1's `/chat` and `/ask` endpoints are unchanged and still
 live for API/grader use, but the browser chat box runs the Week 2 pipeline. This is
@@ -149,14 +149,17 @@ python -m agent.pipeline.respond "do you recommend surgery for John Doe?"
 # document extraction only: PDF -> VLM -> strict Pydantic
 python -m agent.ingestion.extract "agent/ingestion/test_docs/John_Doe-Intake-Form.pdf"
 
+# lab report extraction (second document type)
+python -m agent.ingestion.extract lab_pdf
+
 # retrieval only
 python -m agent.rag.retrieve "dermatochalasis eyelid"
 ```
 
 ### The eval gate
 
-24 boolean-rubric cases, all five required categories, fully offline — no OpenEMR, no
-Anthropic, no tokens, ~0.4 s.
+50 boolean-rubric cases, all five required categories, fully offline — no OpenEMR, no
+Anthropic, no tokens, ~0.8 s.
 
 ```bash
 python -m pytest agent/gate -q          # run it
@@ -180,6 +183,8 @@ blocks: add a failing assertion to any file in `agent/gate/`, commit, and attemp
 | `safe_refusal` | ✅ | `agent/gate/test_grounded_answer.py` |
 | `no_phi_in_logs` | 3 | `agent/gate/test_no_phi_in_logs.py` |
 | intake extraction schema | 4 | `agent/gate/test_intake_extraction_schema.py` |
+| lab extraction schema | 8 | `agent/gate/test_lab_extraction_schema.py` |
+| golden set (9 off-scope + 9 in-scope) | 18 | `agent/gate/test_golden_set.py` |
 
 The Week 1 live suite (`agent/evals/`) is **not** in the gate — it needs live OpenEMR and
 Anthropic, takes ~7 minutes, and has failed on free-tier OAuth timeouts unrelated to any code
@@ -217,7 +222,7 @@ agent/
 ├── ingestion/          # document -> VLM -> strict Pydantic
 │   ├── extract.py      #   6-page PDF -> one vision call -> IntakeFormExtraction
 │   ├── schemas.py      #   strict schema; inherits Week 1 SourcedRecord
-│   └── test_docs/      #   John_Doe-Intake-Form.pdf (synthetic)
+│   └── test_docs/      #   John_Doe-Intake-Form.pdf, CBC_Lab_Report.pdf (synthetic)
 ├── rag/                # hybrid retrieval over the guideline corpus
 │   ├── retrieve.py     #   paragraph chunking, BM25 + dense, citation shape
 │   └── guidelines/     #   3 ophthalmology guideline PDFs
@@ -238,7 +243,7 @@ agent/
 | `W2_COST_LATENCY.md` | p50/p95 latency, bottleneck analysis, cost per operation, dev spend, production projection |
 
 **Read `W2_ARCHITECTURE.md` §7 first.** It lists what is *not* built — FHIR write-back, the lab
-PDF, the bbox overlay, 50 cases (24 exist), Cohere rerank — plainly rather than buried. Where a
+PDF, the bbox overlay, Cohere rerank — plainly rather than buried. Where a
 requirement is unmet, it says so.
 
 ### All synthetic data
