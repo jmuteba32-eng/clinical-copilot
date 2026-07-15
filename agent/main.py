@@ -792,6 +792,26 @@ async def respond_endpoint(
 
     grounded = await asyncio.to_thread(_run_pipeline, payload.question, correlation_id)
 
+    # Audit EVERY handled request, not just denials. A successful answer is the
+    # event most worth recording: it is the one where PHI-derived content reached
+    # a user. Week 1 feedback asked for user, correlation id, action, result, and
+    # denial reason "for each request" -- a log that records only refusals is
+    # backwards.
+    #
+    # patient_id is the literal string "week2-respond", not a FHIR id, because
+    # this endpoint is NOT patient-scoped: it answers from a cached intake
+    # fixture and does not accept a patient_id. Recording a real-looking id here
+    # would be a fabricated audit record -- the log must not claim scoping the
+    # system does not have. See W2_ARCHITECTURE.md section 7.
+    _record_audit(
+        request,
+        event_type="respond",
+        outcome="success" if grounded.scope == "in_scope" else "refused",
+        patient_id="week2-respond",
+        correlation_id=correlation_id,
+        denial_reason=grounded.refusal_reason,
+    )
+
     return RespondResponse(
         scope=grounded.scope,
         verified=grounded.verified,
