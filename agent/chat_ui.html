@@ -1224,6 +1224,7 @@
         setLoading(true);
         try {
           const { ok, status, data } = await apiPost("/respond", {
+            patient_id: state.patientId,
             question: text,
           });
 

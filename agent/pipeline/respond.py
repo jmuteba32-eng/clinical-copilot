@@ -26,6 +26,18 @@ from agent.rag.retrieve import retrieve_evidence
 load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 _INTAKE_FIXTURE = Path(__file__).resolve().parent / "john_doe_intake.json"
+
+# The OpenEMR Patient this ingested intake form belongs to. Verified against the
+# live FHIR API: this patient carries Oxymetazoline (Upneeq) and an eyelid
+# disorder coded H02.839 -- the same facts the intake form states, so the
+# document and the chart are the same person.
+#
+# /respond is scoped to this patient and refuses any other. That refusal is the
+# point: without it, selecting a different patient in the UI would still return
+# THIS patient's document-derived answer, which is a cross-patient leak of
+# exactly the kind Week 1's session scoping exists to prevent.
+FIXTURE_PATIENT_ID = "a2388bb2-562c-413c-9505-7a3c6104d944"
+
 _MODEL = "claude-sonnet-4-6"
 
 
@@ -43,6 +55,16 @@ def _intake_summary(intake: dict) -> str:
         f"(onset {intake.get('concern_onset')}). Symptoms: {intake.get('concern_symptoms')}. "
         f"Current medications: {meds}. Allergies: {allergies}."
     )
+
+
+def has_documents_for(patient_id: str) -> bool:
+    """Whether any document has been ingested for this patient.
+
+    Today this is a single cached fixture, so the check is an equality test.
+    When ingestion writes to OpenEMR, this becomes a real lookup and nothing
+    else in the pipeline changes -- the seam is deliberate.
+    """
+    return patient_id == FIXTURE_PATIENT_ID
 
 
 def respond(question: str, correlation_id: str = "-") -> GroundedAnswer:

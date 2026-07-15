@@ -508,6 +508,7 @@ class AskResponse(BaseModel):
 
 
 class RespondRequest(BaseModel):
+    patient_id: str = Field(..., min_length=1, description="The FHIR Patient resource ID this question is scoped to.")
     question: str = Field(..., min_length=1, description="The physician's natural-language question. Routed through the Week 2 grounded-answer pipeline (scope classification, hybrid RAG retrieval, cited answer).")
 
 
@@ -783,6 +784,31 @@ async def respond_endpoint(
             content={"error": BAA_REFUSAL_MESSAGE, "correlation_id": correlation_id},
         )
 
+    from agent.pipeline.respond import has_documents_for
+
+    if not has_documents_for(payload.patient_id):
+        _record_audit(
+            request,
+            event_type="respond",
+            outcome="refused",
+            patient_id=payload.patient_id,
+            correlation_id=correlation_id,
+            denial_reason="no_ingested_documents: no documents have been ingested for this patient",
+        )
+        return RespondResponse(
+            scope="out_of_scope",
+            verified=False,
+            answer=(
+                "No clinical documents have been ingested for this patient, so I have "
+                "nothing to ground an answer in. I can only answer from documents that "
+                "have been uploaded and extracted for the patient in this session."
+            ),
+            refusal_reason="no_ingested_documents: no documents have been ingested for this patient",
+            citations=[],
+            handoffs=[],
+            correlation_id=correlation_id,
+        )
+
     logger.info(
         "respond_request",
         extra={"event": "respond_request", "correlation_id": correlation_id, "question_length": len(payload.question)},
@@ -798,16 +824,15 @@ async def respond_endpoint(
     # denial reason "for each request" -- a log that records only refusals is
     # backwards.
     #
-    # patient_id is the literal string "week2-respond", not a FHIR id, because
-    # this endpoint is NOT patient-scoped: it answers from a cached intake
-    # fixture and does not accept a patient_id. Recording a real-looking id here
-    # would be a fabricated audit record -- the log must not claim scoping the
-    # system does not have. See W2_ARCHITECTURE.md section 7.
+    # patient_id is the real FHIR Patient id the physician selected. The request
+    # only reaches here if has_documents_for() confirmed we hold ingested
+    # documents for that patient, so the audited id and the answered-about
+    # patient are the same person.
     _record_audit(
         request,
         event_type="respond",
         outcome="success" if grounded.scope == "in_scope" else "refused",
-        patient_id="week2-respond",
+        patient_id=payload.patient_id,
         correlation_id=correlation_id,
         denial_reason=grounded.refusal_reason,
     )
