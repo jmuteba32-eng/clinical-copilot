@@ -59,8 +59,12 @@ def respond(question: str, correlation_id: str = "-") -> GroundedAnswer:
     graph = build_graph()
     final = graph.invoke({"question": question, "correlation_id": correlation_id})
 
+    handoffs = final.get("handoffs", [])
+
     if final.get("scope") == "out_of_scope":
-        return answer_question(question, intake_summary="", evidence_citations=[], answer_text="")
+        return answer_question(
+            question, intake_summary="", evidence_citations=[], answer_text="", handoffs=handoffs
+        )
 
     citations = [Citation(**c) for c in final.get("citations", [])]
     return answer_question(
@@ -68,6 +72,7 @@ def respond(question: str, correlation_id: str = "-") -> GroundedAnswer:
         intake_summary=final.get("intake_summary", ""),
         evidence_citations=citations,
         answer_text=final.get("answer_text", ""),
+        handoffs=handoffs,
     )
 
 

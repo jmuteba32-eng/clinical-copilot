@@ -58,6 +58,16 @@ class GroundedAnswer(BaseModel):
     citations: list[Citation] = Field(default_factory=list)
     verified: bool = False
     refusal_reason: Optional[str] = None
+    handoffs: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "The supervisor/worker routing trace for this request: which worker ran, "
+            "in what order, and why the supervisor chose it. Surfaced to the client so "
+            "routing is inspectable in the product, not only in server logs -- the "
+            "supervisor must not be a black box. Routing metadata only; carries no PHI "
+            "(enforced by test_no_phi_in_logs.py)."
+        ),
+    )
 
     def model_post_init(self, __context) -> None:
         # Enforce the invariant structurally: no citations => not verified;
@@ -89,6 +99,7 @@ def answer_question(
     intake_summary: str,
     evidence_citations: list[Citation],
     answer_text: str,
+    handoffs: list[dict] | None = None,
 ) -> GroundedAnswer:
     """Compose a grounded answer. Off-scope short-circuits to a labeled refusal.
 
@@ -110,9 +121,11 @@ def answer_question(
             ),
             citations=[],
             refusal_reason="out_of_scope: question is not about this patient's clinical care",
+            handoffs=handoffs or [],
         )
     return GroundedAnswer(
         scope="in_scope",
         answer_text=answer_text,
         citations=evidence_citations,
+        handoffs=handoffs or [],
     )

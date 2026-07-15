@@ -292,6 +292,7 @@ def _record_audit(
     username: str | None = None,
     patient_id: str | None = None,
     correlation_id: str | None = None,
+    denial_reason: str | None = None,
 ) -> None:
     """Append one audit event; never raises — failures are logged and dropped."""
     trail: AuditTrail | None = getattr(request.app.state, "audit_trail", None)
@@ -304,9 +305,48 @@ def _record_audit(
             outcome=outcome,
             patient_id=patient_id,
             correlation_id=correlation_id or _correlation_id_for(request),
+            denial_reason=denial_reason,
         )
     except Exception:
         logger.warning("audit_record_failed", extra={"event": "audit_record_failed"}, exc_info=True)
+
+
+def _unauthorized(request: Request, correlation_id: str, endpoint: str) -> JSONResponse | None:
+    """Reject a request that carries no valid UI session.
+
+    Returns a 401 JSONResponse when the caller is unauthenticated, or None when
+    the caller is authorized and the handler should proceed.
+
+    Every PHI-touching endpoint must call this BEFORE doing any work. The BAA
+    gate is a separate, orthogonal control: it asks "is this deployment allowed
+    to touch PHI at all", not "is this caller allowed to". Both must pass.
+
+    Denials are audited with an explicit denial reason (Week 1 grader feedback:
+    the audit log must record user, correlation id, action, result, AND why a
+    request was refused).
+    """
+    if _ui_username_from_request(request) is not None:
+        return None
+    _record_audit(
+        request,
+        event_type=endpoint,
+        outcome="denied",
+        correlation_id=correlation_id,
+        denial_reason="unauthenticated: no valid session token",
+    )
+    logger.info(
+        "auth_denied",
+        extra={
+            "event": "auth_denied",
+            "correlation_id": correlation_id,
+            "endpoint": endpoint,
+            "denial_reason": "unauthenticated: no valid session token",
+        },
+    )
+    return JSONResponse(
+        status_code=401,
+        content={"error": "Sign in required.", "correlation_id": correlation_id},
+    )
 
 
 def _is_baa_confirmed() -> bool:
@@ -471,6 +511,15 @@ class RespondRequest(BaseModel):
     question: str = Field(..., min_length=1, description="The physician's natural-language question. Routed through the Week 2 grounded-answer pipeline (scope classification, hybrid RAG retrieval, cited answer).")
 
 
+class RespondHandoff(BaseModel):
+    """One supervisor/worker routing step. Routing metadata only, no PHI."""
+    from_: str = Field(..., alias="from")
+    to: str
+    reason: str
+
+    model_config = {"populate_by_name": True}
+
+
 class RespondCitation(BaseModel):
     source_type: str
     source_id: str
@@ -485,6 +534,7 @@ class RespondResponse(BaseModel):
     answer: str
     refusal_reason: str | None = None
     citations: list[RespondCitation] = Field(default_factory=list)
+    handoffs: list[RespondHandoff] = Field(default_factory=list)
     correlation_id: str
 
 
@@ -722,6 +772,10 @@ async def respond_endpoint(
     """
     correlation_id = _correlation_id_for(request)
 
+    denied = _unauthorized(request, correlation_id, "respond")
+    if denied is not None:
+        return denied
+
     if not _is_baa_confirmed():
         _record_baa_gate_blocked(request, patient_id="week2-respond", correlation_id=correlation_id)
         return JSONResponse(
@@ -744,6 +798,7 @@ async def respond_endpoint(
         answer=grounded.answer_text,
         refusal_reason=grounded.refusal_reason,
         citations=[RespondCitation(**c.model_dump()) for c in grounded.citations],
+        handoffs=[RespondHandoff(**h) for h in grounded.handoffs],
         correlation_id=correlation_id,
     )
 
@@ -756,6 +811,10 @@ async def ask(
     openemr_client: OpenEMRClient = Depends(get_openemr_client),
 ) -> AskResponse | JSONResponse:
     correlation_id = _correlation_id_for(request)
+
+    denied = _unauthorized(request, correlation_id, "ask")
+    if denied is not None:
+        return denied
 
     if not _is_baa_confirmed():
         _record_baa_gate_blocked(request, patient_id=payload.patient_id, correlation_id=correlation_id)
@@ -1017,6 +1076,10 @@ async def chat(
     openemr_client: OpenEMRClient = Depends(get_openemr_client),
 ) -> ChatResponse | JSONResponse:
     correlation_id = _correlation_id_for(request)
+
+    denied = _unauthorized(request, correlation_id, "chat")
+    if denied is not None:
+        return denied
 
     if not _is_baa_confirmed():
         _record_baa_gate_blocked(request, patient_id=payload.patient_id, correlation_id=correlation_id)

@@ -462,6 +462,14 @@
       color: #991b1b;
     }
 
+    /* Week 2: supervisor/worker routing trace -- the graph, made inspectable. */
+    .w2-trace { margin-top: 10px; font-size: 12px; }
+    .w2-trace summary { cursor: pointer; opacity: 0.65; }
+    .w2-trace-list { margin: 8px 0 4px 0; padding-left: 20px; }
+    .w2-trace-list li { margin: 3px 0; opacity: 0.8; }
+    .w2-trace-list code { font-size: 11px; background: rgba(0,0,0,0.05); padding: 1px 4px; border-radius: 3px; }
+    .w2-trace-why { display: block; opacity: 0.6; font-size: 11px; margin-left: 2px; }
+
     /* Week 2: click-to-source citation snippets under a grounded answer. */
     .w2-cites { margin-top: 10px; border-top: 1px solid rgba(0,0,0,0.08); padding-top: 8px; }
     .w2-cite { font-size: 12px; margin: 4px 0; }
@@ -912,9 +920,27 @@
           refusalHtml = '<p class="w2-refusal">' + escapeHtml(data.refusal_reason) + "</p>";
         }
 
+        // Week 2: the supervisor's routing trace. The PRD requires that the
+        // supervisor not be a black box -- so every routing decision and worker
+        // handoff is shown here, in the product, not just in server logs.
+        let traceHtml = "";
+        const hops = data.handoffs || [];
+        if (hops.length) {
+          traceHtml =
+            '<details class="w2-trace">' +
+            "<summary>Agent routing \u00b7 " + hops.length + " handoff" + (hops.length === 1 ? "" : "s") + "</summary>" +
+            '<ol class="w2-trace-list">';
+          hops.forEach(function (h) {
+            traceHtml +=
+              "<li><code>" + escapeHtml(h.from) + "</code> \u2192 <code>" + escapeHtml(h.to) + "</code>" +
+              '<span class="w2-trace-why">' + escapeHtml(h.reason) + "</span></li>";
+          });
+          traceHtml += "</ol></details>";
+        }
+
         row.innerHTML =
           '<span class="msg-label">Co-Pilot</span>' +
-          '<div class="bubble agent">' + formatAnswerHtml(data.answer || "") + refusalHtml + citeHtml + "</div>" +
+          '<div class="bubble agent">' + formatAnswerHtml(data.answer || "") + refusalHtml + citeHtml + traceHtml + "</div>" +
           '<span class="verify-badge ' + badgeClass + '">' +
           '<span class="verify-dot"></span>' + badgeLabel +
           "</span>";

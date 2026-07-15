@@ -30,7 +30,16 @@ _DEFAULT_RELATIVE_PATH: Final[str] = "agent/audit_log.jsonl"
 _FALLBACK_FILENAME: Final[str] = "clinical-copilot-audit.jsonl"
 _VOLUME_SUBDIR_NAME: Final[str] = "clinical-copilot-audit"
 
-AuditEventType = Literal["login", "patient_access", "access_refused", "logout", "baa_gate_blocked"]
+AuditEventType = Literal[
+    "login",
+    "patient_access",
+    "access_refused",
+    "logout",
+    "baa_gate_blocked",
+    "ask",
+    "chat",
+    "respond",
+]
 
 
 class AuditRecord(BaseModel):
@@ -45,6 +54,10 @@ class AuditRecord(BaseModel):
     )
     correlation_id: str = Field(..., description="Request correlation ID for joining to server logs.")
     outcome: str = Field(..., description="Result of the event (e.g. success, failure, refused).")
+    denial_reason: str | None = Field(
+        default=None,
+        description="Why a request was refused or denied, when applicable.",
+    )
 
 
 class AuditTrail:
@@ -95,6 +108,7 @@ class AuditTrail:
         outcome: str,
         correlation_id: str,
         patient_id: str | None = None,
+        denial_reason: str | None = None,
     ) -> None:
         if not self._writable:
             return
@@ -105,6 +119,7 @@ class AuditTrail:
             patient_id=patient_id,
             correlation_id=correlation_id,
             outcome=outcome,
+            denial_reason=denial_reason,
         )
         line = record.model_dump_json() + "\n"
         try:
@@ -134,6 +149,7 @@ class AuditTrail:
         outcome: str,
         correlation_id: str,
         patient_id: str | None = None,
+        denial_reason: str | None = None,
     ) -> None:
         async with self._lock:
             await asyncio.to_thread(
@@ -143,6 +159,7 @@ class AuditTrail:
                 outcome=outcome,
                 correlation_id=correlation_id,
                 patient_id=patient_id,
+                denial_reason=denial_reason,
             )
 
     async def read_records(self) -> list[AuditRecord]:
