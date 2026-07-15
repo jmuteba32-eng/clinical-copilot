@@ -764,6 +764,8 @@ async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_op
 async def respond_endpoint(
     request: Request,
     payload: RespondRequest,
+    copilot: ClinicalCoPilot = Depends(get_copilot),
+    openemr_client: OpenEMRClient = Depends(get_openemr_client),
 ) -> RespondResponse | JSONResponse:
     """Week 2 grounded-answer pipeline: scope -> hybrid RAG -> cited answer.
 
@@ -778,34 +780,120 @@ async def respond_endpoint(
         return denied
 
     if not _is_baa_confirmed():
-        _record_baa_gate_blocked(request, patient_id="week2-respond", correlation_id=correlation_id)
+        _record_baa_gate_blocked(request, patient_id=payload.patient_id, correlation_id=correlation_id)
         return JSONResponse(
             status_code=403,
             content={"error": BAA_REFUSAL_MESSAGE, "correlation_id": correlation_id},
         )
 
+    from agent.pipeline.answer import classify_scope
     from agent.pipeline.respond import has_documents_for
 
-    if not has_documents_for(payload.patient_id):
+    # Scope is checked BEFORE anything else runs -- before OpenEMR, before the
+    # graph, before any LLM call. An off-scope question is refused the same way
+    # for every patient, whether or not documents exist for them.
+    if classify_scope(payload.question) == "out_of_scope":
         _record_audit(
             request,
             event_type="respond",
             outcome="refused",
             patient_id=payload.patient_id,
             correlation_id=correlation_id,
-            denial_reason="no_ingested_documents: no documents have been ingested for this patient",
+            denial_reason="out_of_scope: question is not about this patient's clinical care",
         )
         return RespondResponse(
             scope="out_of_scope",
             verified=False,
             answer=(
-                "No clinical documents have been ingested for this patient, so I have "
-                "nothing to ground an answer in. I can only answer from documents that "
-                "have been uploaded and extracted for the patient in this session."
+                "That question is outside this patient's clinical scope, so I can't "
+                "answer it from the chart. I can help with this patient's conditions, "
+                "medications, history, and the guideline evidence for their care."
             ),
-            refusal_reason="no_ingested_documents: no documents have been ingested for this patient",
+            refusal_reason="out_of_scope: question is not about this patient's clinical care",
             citations=[],
-            handoffs=[],
+            handoffs=[{"from": "supervisor", "to": "refuse", "reason": "classified scope=out_of_scope"}],
+            correlation_id=correlation_id,
+        )
+
+    # No ingested documents for this patient -> fall back to the Week 1 agent,
+    # which answers from structured OpenEMR chart data.
+    #
+    # This path exists because Week 2 LAYERS document evidence on top of the
+    # chart; it does not replace it. Pointing the UI at /respond initially made
+    # the agent document-only, which silently removed chart access for every
+    # patient without an ingested document -- a regression, not a design.
+    # Patients with no documents still have real conditions and medications, and
+    # a physician asking about them deserves an answer, clearly labelled as
+    # chart-only.
+    if not has_documents_for(payload.patient_id):
+        try:
+            session_chart = await _patient_session_chart(request, payload.patient_id, openemr_client, correlation_id)
+            result = await copilot.answer(payload.patient_id, payload.question, prefetched_chart=session_chart)
+        except Exception as exc:
+            logger.warning(
+                "chart_fallback_failed",
+                extra={
+                    "event": "chart_fallback_failed",
+                    "patient_id": payload.patient_id,
+                    "correlation_id": correlation_id,
+                    "reason": type(exc).__name__,
+                },
+            )
+            _record_audit(
+                request,
+                event_type="respond",
+                outcome="failure",
+                patient_id=payload.patient_id,
+                correlation_id=correlation_id,
+                denial_reason=f"chart_fallback_failed: {type(exc).__name__}",
+            )
+            return RespondResponse(
+                scope="in_scope",
+                verified=False,
+                answer=(
+                    "No documents have been ingested for this patient, and the chart "
+                    "could not be reached to answer from structured records. Nothing is "
+                    "being asserted about this patient."
+                ),
+                refusal_reason=f"chart_fallback_failed: {type(exc).__name__}",
+                citations=[],
+                handoffs=[
+                    {"from": "supervisor", "to": "chart_reader", "reason": "no ingested documents; falling back to chart"},
+                    {"from": "chart_reader", "to": "END", "reason": "chart unreachable"},
+                ],
+                correlation_id=correlation_id,
+            )
+
+        # Week 1 records carry their own source citations (SourcedRecord).
+        chart_citations = [
+            RespondCitation(
+                source_type=r.source_type,
+                source_id=r.source_id,
+                page_or_section=None,
+                field_or_chunk_id=r.source_id,
+                quote_or_value=None,
+            )
+            for r in result["records"]
+        ]
+
+        _record_audit(
+            request,
+            event_type="respond",
+            outcome="success",
+            patient_id=payload.patient_id,
+            correlation_id=correlation_id,
+        )
+
+        return RespondResponse(
+            scope="in_scope",
+            verified=len(chart_citations) > 0,
+            answer=result["answer"],
+            refusal_reason=None,
+            citations=chart_citations,
+            handoffs=[
+                {"from": "supervisor", "to": "chart_reader", "reason": "no ingested documents; answering from OpenEMR chart"},
+                {"from": "chart_reader", "to": "END", "reason": f"chart answer composed from {len(chart_citations)} records"},
+            ],
             correlation_id=correlation_id,
         )
 
