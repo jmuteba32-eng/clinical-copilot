@@ -110,6 +110,7 @@ Week 2 adds two capabilities to the Week 1 agent: it can **read clinical documen
 | Orchestration | single agent + tool layer | LangGraph: supervisor + 2 workers, logged handoffs |
 | UI | chat → `/chat` | **chat → `/respond`** (grounded answers, click-to-source citations) |
 | Evals | `agent/evals/` — live suite, ~7 min, spends tokens | `agent/gate/` — 50 offline cases, 0.8 s, $0.00, **blocks pushes** |
+| Authorization | `/ask`, `/chat` had **no auth check** | all three endpoints 401 unauthenticated requests; denials audited with `denial_reason` |
 
 **The UI now calls `/respond`.** Week 1's `/chat` and `/ask` endpoints are unchanged and still
 live for API/grader use, but the browser chat box runs the Week 2 pipeline. This is
@@ -136,6 +137,7 @@ credentials above, and ask:
 | `do you recommend surgery for John Doe?` | Same — retrieval is query-expanded with the patient's chief concern, so it works even though the question names no condition |
 | `who is LeBron James?` | **Out of clinical scope** — refused before any worker runs, never marked Verified |
 | `2+2` | Same refusal |
+| Expand **"Agent routing · N handoffs"** under any answer | The supervisor/worker trace: which worker ran, in what order, and why. Off-scope questions show 2 handoffs — proof no worker ran. |
 
 The patient picker is **cosmetic in Week 2 mode** — `/respond` does not take a `patient_id`
 and answers about the cached intake fixture. Known wart, documented in `W2_ARCHITECTURE.md` §7.

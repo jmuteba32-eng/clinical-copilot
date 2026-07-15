@@ -134,6 +134,18 @@ because the handoff log is new PHI-leak surface introduced with the graph.
 where the verified/citation invariant is enforced. A critic agent is extension work per
 the PRD and is not built.
 
+### Routing is inspectable in the product, not just the logs
+
+`state["handoffs"]` is returned through `GroundedAnswer` → `RespondResponse` → the UI, which
+renders it as an expandable **"Agent routing · N handoffs"** trace under every answer:
+each step lists `from → to` and the supervisor's reason. The same routing-metadata-only
+contract as the structured logs applies — no patient state, no question text (enforced by
+`test_no_phi_in_logs.py`).
+
+An out-of-scope question shows **2 handoffs** — `supervisor → refuse`, `refuse → END` —
+which is the visible proof that no worker ran and no LLM was called. "The supervisor must
+not be a black box" is not satisfied by logging alone if a reviewer cannot see it.
+
 ---
 
 ## 3. RAG design
@@ -343,9 +355,9 @@ The audit log is not landing on the mounted Railway volume, so **it does not sur
 | *"2+2" and "Testing" display Verified with zero sources* | ✅ Fixed structurally. `GroundedAnswer.verified` is derived in `model_post_init` from `scope == "in_scope" and len(citations) > 0`. Not settable by a caller. Verified live in the deployed UI. |
 | *Off-chart questions should be rejected before the model runs* | ✅ Fixed. The supervisor classifies scope first and routes to `refuse` — no worker runs, no retrieval, no LLM call. |
 | *BAA flag is not proof of HIPAA compliance* | ✅ Language corrected in this document and the demo. |
-| *Audit log should capture denial reason* | ❌ Not done (§7.5). |
+| *Audit log should capture denial reason* | ✅ **Fixed.** `_record_audit` now accepts `denial_reason`, and `AuditRecord` persists it. Auth denials audit as `outcome="denied"` with `denial_reason="unauthenticated: no valid session token"`. |
 | *Eval report predates the final code* | ✅ Fixed structurally — the gate runs on every push; stale evidence cannot accumulate silently. |
-| *No tests on the HTTP authorization boundary* | ❌ Not done (§7.6). |
+| *No tests on the HTTP authorization boundary* | ✅ **Fixed — and the finding was worse than reported.** The grader flagged missing *tests*; the underlying hole was that `/ask` and `/chat` had **no auth check at all**, and `/respond` inherited the same gap. All three now reject unauthenticated requests with 401 before any work, verified in production. Found by reading this project's own audit trail, which logged `week2-respond` requests as `unauthenticated`. |
 
 **The theme of that feedback — "make sure your evidence matches your claims" — is the organizing principle of this document.** Where a requirement is unmet, it is listed as unmet.
 
@@ -370,16 +382,12 @@ Stated plainly rather than buried.
    answers about the cached intake fixture. The UI's patient selector is therefore
    **cosmetic in Week 2 mode**. This is a real wart, and it resolves naturally when FHIR
    persistence lands (item 1).
-5. **Audit-log denial reason.** `refusal_reason` exists on the answer object and is returned
-   to the client, but is not yet written to the audit trail (Week 1 grader feedback).
-6. **HTTP authorization-boundary tests** for `/ask`, `/chat`, `/respond` — a known gap
-   carried from Week 1.
-7. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
+5. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
    dependencies (vector index, reranker reachability), per-worker tracing spans, dashboards
    and alerts, Postman/Bruno collection, backup/RPO/RTO, baseline CPU/memory profiles: not
    addressed.
-8. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
-9. **Lab-to-chart identity reconciliation.** `extract_lab_report` transcribes whichever patient
+6. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
+7. **Lab-to-chart identity reconciliation.** `extract_lab_report` transcribes whichever patient
    the report names. Nothing checks that a report's patient matches the session's patient. In a
    real deployment that check is mandatory before a lab value is shown next to a chart.
 
@@ -399,7 +407,6 @@ Stated plainly rather than buried.
 **Deliberately not tested:**
 - **The VLM's extraction accuracy** — asserting Claude reads "Dermatochalasis" off page 4 would be a live, token-spending, nondeterministic test. The gate instead asserts that *whatever* the VLM returns must satisfy the schema. The schema is the contract; the model is not.
 - **Real PDF + real embedding model in the gate** — the citation test uses a stub corpus to stay offline and sub-second.
-- **The HTTP authorization boundary** — a known gap carried over from Week 1 (§6).
 
 ---
 
@@ -423,3 +430,29 @@ Stated plainly rather than buried.
 Every `/respond` request carries a correlation ID through Week 1's existing middleware and returns it in the response body. The request log records `question_length`, never the question text — free-text physician questions can restate chart specifics ("does his A1c look better than last visit"), so question text is treated as PHI-adjacent and kept out of logs entirely. This matches `/ask`.
 
 **Gap:** the correlation ID is not yet propagated into the VLM call, the retrieval call, or per-step spans. A full multi-step trace is not reconstructable from the ID alone.
+
+---
+
+## 11. Authorization
+
+Every PHI-touching endpoint (`/ask`, `/chat`, `/respond`) rejects unauthenticated requests
+with **401** before doing any work. Order per request: **auth check → BAA gate → handler**.
+
+The two controls are orthogonal and both must pass:
+
+- **Auth** asks *"is this caller allowed to?"* — a valid UI session bearer token.
+- **The BAA gate** asks *"is this deployment allowed to touch PHI at all?"* — an administrator's
+  attestation. It is a fail-closed deployment control, not proof of HIPAA compliance.
+
+Denials are audited with `outcome="denied"` and an explicit `denial_reason`, and logged as an
+`auth_denied` event carrying the correlation ID.
+
+**How this was found.** The Week 1 grader noted that tests did not cover the authorization
+boundary on `/ask` and `/chat`. The actual defect was larger: those endpoints had no auth check
+at all, and `/respond` was built mirroring their structure and inherited the gap. It surfaced
+while reading this project's own audit trail, which recorded `week2-respond` requests with
+`user=unauthenticated, outcome=blocked` — blocked only by the BAA gate, which is the wrong
+control doing the right thing by accident. With `BAA_CONFIRMED=true` (as in production), an
+unauthenticated caller would have received a full clinical answer.
+
+The audit trail catching this is the argument for building one.
