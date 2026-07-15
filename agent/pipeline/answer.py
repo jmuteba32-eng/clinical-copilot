@@ -30,8 +30,9 @@ _IN_SCOPE_TERMS = (
     "guideline", "manage", "recommend", "chart", "intake", "lab", "result",
     "dermatochalasis", "eyelid", "eye", "vision", "dry eye", "keratoconus",
     "family history", "surgery", "surgical", "follow-up", "followup", "visit",
-    "he ", "his ", "she ", "her ", "them", "this patient",
+    "this patient",
 )
+_IN_SCOPE_PRONOUN_RE = re.compile(r"\b(he|his|she|her|them)\b")
 
 _OUT_OF_SCOPE_PATTERNS = (
     re.compile(r"^\s*\d+\s*[\+\-\*/x]\s*\d+"),
@@ -74,6 +75,8 @@ def classify_scope(question: str) -> Scope:
     for pat in _OUT_OF_SCOPE_PATTERNS:
         if pat.search(q):
             return "out_of_scope"
+    if _IN_SCOPE_PRONOUN_RE.search(q):
+        return "in_scope"
     if any(term in q for term in _IN_SCOPE_TERMS):
         return "in_scope"
     # Default: if it names nothing clinical and isn't obviously general, treat as

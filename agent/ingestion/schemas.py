@@ -16,7 +16,7 @@ W2_ARCHITECTURE.md, not an oversight.
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -100,4 +100,89 @@ class IntakeFormExtraction(SourcedRecord):
     family_history: list[FamilyHistoryEntry] = Field(
         default_factory=list,
         description="Family-history rows.",
+    )
+
+
+class LabResult(BaseModel):
+    """One row from a lab report's results table.
+
+    Every PRD-required lab field lives here except collection date and the
+    source citation, which are properties of the REPORT (identical for every
+    row) and live on LabReportExtraction.
+    """
+
+    test_name: str = Field(..., description="Test name exactly as printed, e.g. 'Hemoglobin (Hb)'.")
+    value: str = Field(
+        ...,
+        description=(
+            "Result value exactly as printed, kept as a string. NOT parsed to a "
+            "number: real reports carry values like '<0.01', '150000', and "
+            "'Not Detected', and coercing them to float would either crash or "
+            "silently invent precision. Downstream code that needs a number can "
+            "parse it and handle failure explicitly."
+        ),
+    )
+    unit: Optional[str] = Field(default=None, description="Unit as printed, e.g. 'g/dL'. Optional: some rows are unitless.")
+    reference_range: Optional[str] = Field(
+        default=None,
+        description="Reference range as printed, e.g. '13.0 - 17.0'. Kept verbatim, not parsed into bounds.",
+    )
+    abnormal_flag: Optional[Literal["High", "Low", "Borderline"]] = Field(
+        default=None,
+        description=(
+            "The lab's OWN flag on this row, transcribed -- never inferred. None "
+            "means the report printed no flag. Deliberately not a boolean: the "
+            "source report distinguishes High, Low, and Borderline, and flattening "
+            "that to abnormal=True would destroy the direction of the abnormality, "
+            "which is the clinically meaningful part. The agent must not compute "
+            "this from value vs range either -- the lab's flag is the authority, "
+            "and silently disagreeing with it would be a fabricated claim."
+        ),
+    )
+    section: Optional[str] = Field(
+        default=None,
+        description="Panel heading this row appeared under, e.g. 'DIFFERENTIAL WBC COUNT'. Optional.",
+    )
+
+
+class LabReportExtraction(SourcedRecord):
+    """Strict schema a lab-report VLM extraction MUST validate against.
+
+    Second of the two required document types. Same contract as the intake form:
+    raw model output is rejected rather than coerced, and every derived fact is
+    traceable to source_id + source_page.
+
+    NOTE ON PATIENT IDENTITY: this report's patient is whoever the document says
+    it is. It is NOT assumed to be the session's patient. The extractor's job is
+    to transcribe the document faithfully; reconciling report identity against
+    chart identity is a separate concern and is not done here (see
+    W2_ARCHITECTURE.md section 7).
+    """
+
+    source_page: int = Field(..., ge=1, description="1-based page of the source document.")
+
+    patient_name: str = Field(..., description="Patient name as printed on the report.")
+    patient_age: Optional[str] = Field(default=None, description="Age as printed, e.g. '21 Years'.")
+    patient_sex: Optional[str] = Field(default=None, description="Sex as printed.")
+
+    lab_name: Optional[str] = Field(default=None, description="Issuing laboratory name.")
+    referring_physician: Optional[str] = Field(default=None, description="'Ref. By' physician as printed.")
+    sample_type: Optional[str] = Field(default=None, description="Primary sample type, e.g. 'Blood'.")
+    collection_date: Optional[str] = Field(
+        default=None,
+        description=(
+            "PRD-required. Collection date/time as printed ('Collected on'), verbatim "
+            "and unnormalized -- a lab value's meaning depends on WHEN it was drawn, "
+            "and guessing a format would be inventing provenance."
+        ),
+    )
+    reported_date: Optional[str] = Field(default=None, description="'Reported on' date/time as printed.")
+
+    results: list[LabResult] = Field(
+        default_factory=list,
+        description="Every result row on the report, in document order.",
+    )
+    interpretation: Optional[str] = Field(
+        default=None,
+        description="The lab's own printed interpretation/comment, if any. Transcribed, never authored.",
     )

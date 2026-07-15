@@ -24,7 +24,7 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 import fitz  # pymupdf
 from anthropic import Anthropic
 
-from agent.ingestion.schemas import IntakeFormExtraction
+from agent.ingestion.schemas import IntakeFormExtraction, LabReportExtraction
 
 _MODEL = "claude-sonnet-4-6"  # vision-capable; matches the project's model tier
 
@@ -53,6 +53,46 @@ Rules:
 - If a field is blank anywhere, use null (or an empty list).
 - If allergies explicitly say None, return a single entry {"allergen": "None", "reaction": null}.
 - Do NOT extract Social Security Number, address, phone, email, or insurance details.
+- Return ONLY the JSON object. No prose, no markdown, no code fences.
+"""
+
+_LAB_EXTRACTION_INSTRUCTION = """You are a careful clinical lab-report extractor.
+You are given all pages of one laboratory report as images.
+Extract what is printed into one JSON object of this shape:
+
+{
+  "patient_name": <str>,
+  "patient_age": <str or null>,
+  "patient_sex": <str or null>,
+  "lab_name": <str or null>,
+  "referring_physician": <str or null>,
+  "sample_type": <str or null>,
+  "collection_date": <str or null>,
+  "reported_date": <str or null>,
+  "interpretation": <str or null>,
+  "results": [
+    {
+      "test_name": <str>,
+      "value": <str>,
+      "unit": <str or null>,
+      "reference_range": <str or null>,
+      "abnormal_flag": <"High" | "Low" | "Borderline" | null>,
+      "section": <str or null>
+    }
+  ]
+}
+
+Rules:
+- Transcribe EXACTLY as printed. Do not infer, normalize, convert units, or invent.
+- Keep every value as a string exactly as shown (e.g. "150000", "12.5", "<0.01").
+- abnormal_flag: ONLY use the flag the report itself prints next to that row.
+  If the report prints no flag for a row, use null. Do NOT compute or guess a
+  flag by comparing the value to the reference range -- the lab's own flag is
+  the authority.
+- section: the panel heading the row appears under (e.g. "HEMOGLOBIN",
+  "DIFFERENTIAL WBC COUNT", "BLOOD INDICES"), or null.
+- Include EVERY result row on the report, in document order.
+- collection_date: use the "Collected on" value as printed.
 - Return ONLY the JSON object. No prose, no markdown, no code fences.
 """
 
@@ -106,10 +146,61 @@ def extract_intake_form(
     return IntakeFormExtraction.model_validate(data)
 
 
+def extract_lab_report(
+    pdf_path: str | Path,
+    source_id: str | None = None,
+) -> LabReportExtraction:
+    """Extract a lab-report PDF (all pages) into a validated LabReportExtraction.
+
+    Same contract as extract_intake_form: raises on malformed JSON or schema
+    violation rather than coercing. The schema is the source of truth.
+    """
+    pdf_path = Path(pdf_path)
+    pages = _render_all_pages_to_png(pdf_path)
+
+    content: list[dict] = []
+    for png in pages:
+        b64 = base64.standard_b64encode(png).decode("ascii")
+        content.append(
+            {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64}}
+        )
+    content.append({"type": "text", "text": _LAB_EXTRACTION_INSTRUCTION})
+
+    client = Anthropic()
+    resp = client.messages.create(
+        model=_MODEL,
+        max_tokens=2000,
+        messages=[{"role": "user", "content": content}],
+    )
+
+    raw = "".join(b.text for b in resp.content if b.type == "text").strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1].lstrip("json").strip()
+
+    data = json.loads(raw)
+    data.setdefault("source_id", source_id or pdf_path.name)
+    data.setdefault("source_type", "lab_pdf")
+    data.setdefault("source_page", 1)
+
+    return LabReportExtraction.model_validate(data)
+
+
 if __name__ == "__main__":
     import sys
 
-    default_pdf = Path(__file__).resolve().parent / "test_docs" / "John_Doe-Intake-Form.pdf"
-    path = sys.argv[1] if len(sys.argv) > 1 else str(default_pdf)
-    result = extract_intake_form(path)
+    doc_type = sys.argv[1] if len(sys.argv) > 1 else "intake_form"
+    if doc_type not in ("intake_form", "lab_pdf"):
+        print("usage: python -m agent.ingestion.extract [intake_form|lab_pdf] [path]")
+        raise SystemExit(2)
+
+    defaults = {
+        "intake_form": Path(__file__).resolve().parent / "test_docs" / "John_Doe-Intake-Form.pdf",
+        "lab_pdf": Path(__file__).resolve().parent / "test_docs" / "CBC_Lab_Report.pdf",
+    }
+    path = sys.argv[2] if len(sys.argv) > 2 else str(defaults[doc_type])
+
+    if doc_type == "lab_pdf":
+        result = extract_lab_report(path)
+    else:
+        result = extract_intake_form(path)
     print(result.model_dump_json(indent=2))
