@@ -177,7 +177,9 @@ is reading the document once, not answering questions about it. Two levers follo
 
 ### What is not modeled
 
-- Cohere rerank (not implemented — see architecture §7)
+- **Cohere rerank is now enabled in production** but not priced above. It adds one API call per
+  in-scope question (10 short documents), and a small latency increment. Not re-measured — the
+  p50/p95 figures in §1 predate it.
 - FHIR write-back to OpenEMR (not implemented)
 - **Lab PDF ingestion is implemented but not included in the projection above.** A second
   document per patient would roughly double per-patient ingestion cost (~$0.058 → ~$0.116),

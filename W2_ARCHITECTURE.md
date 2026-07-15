@@ -183,7 +183,34 @@ improvement.
 
 **Retrieval:** hybrid — BM25 (keyword) + local dense vectors (`all-MiniLM-L6-v2` via sentence-transformers), scores min-max normalized and summed.
 
-**Reranking:** none. The PRD names "Cohere Rerank **or equivalent**." A normalized sparse+dense hybrid is offered as the equivalent for a 3-document corpus. Cohere rerank is not wired in — tracked in §7.
+**Reranking: Cohere Rerank (`rerank-v3.5`), enabled in production via `RERANK=on`.**
+
+The retriever casts a wide net and the reranker picks precisely: hybrid/BM25 scores the whole
+corpus, the top **10** candidates go to Cohere, and it returns the final **3**. That split is
+the point — reranking the same 3 chunks the retriever already chose would change almost
+nothing, so `_CANDIDATE_K = 10` is what makes the reranker worth its cost.
+
+**Non-fatal by design.** If the key is missing, the model name is wrong, or Cohere is
+unreachable, `_rerank()` logs (`rerank_skipped` / `rerank_failed`) and returns the unreranked
+hits rather than raising. A reranker is a quality improvement on top of retrieval that already
+works; it must never become a single point of failure that takes a clinical answer down. This
+was verified accidentally during development: a missing key produced `rerank_skipped` and the
+pipeline still returned three correct, cited dermatochalasis chunks with `verified=True`.
+
+When reranking is on, Cohere's relevance scale replaces the retriever's scores, so
+`_MIN_RELATIVE_SCORE` no longer applies — the reranker *is* the relevance judgement.
+
+**Measured effect** on *"do you recommend surgery for John Doe?"* (query-expanded):
+
+| Rank | BM25 only (scores ~17) | Reranked (Cohere 0–1) |
+|---|---|---|
+| 1 | p6 — functional surgery indications | 0.409 — p6, functional surgery indications |
+| 2 | p5 — 20–64% visual field loss stat | **0.299 — p5, "a common functional indication ... is dermatochalasis"** |
+| 3 | p5 — "a common functional indication..." | 0.269 — p5, review objectives |
+
+The reranker promoted the chunk that most directly answers the question and dropped the
+statistic. Both orderings cite the correct guideline; the reranker is a refinement, not a
+rescue.
 
 **Citation shape** (matches the PRD contract):
 ```json
@@ -203,6 +230,18 @@ improvement.
 **Production runs `RAG_MODE=bm25`.** Local development runs full hybrid. This is an honest tradeoff — prod retrieval is keyword-only — accepted because BM25 alone ranks the correct guideline first for the test scenario, and because a lighter, reliably-building image was worth more than marginal ranking quality for this milestone.
 
 The lazy import also keeps the offline eval gate fast: importing `agent.rag.retrieve` in the gate does not drag in torch. (Measured: gate went 0.16s → 8.19s when the import was top-level, back to 0.30s once made lazy.)
+
+### Rerank environment (`RERANK`, `COHERE_API_KEY`, `COHERE_RERANK_MODEL`)
+
+| Variable | Default | Production | Purpose |
+|---|---|---|---|
+| `RERANK` | `off` | `on` | Enables Cohere Rerank after the wide candidate pool is scored |
+| `COHERE_API_KEY` | — | set | Cohere API key. **If absent, rerank is skipped** (`rerank_skipped`); retrieval still works |
+| `COHERE_RERANK_MODEL` | `rerank-v3.5` | `rerank-v3.5` | Rerank model id |
+
+`agent/rag/retrieve.py` loads `agent/.env` relative to the module path (same convention as
+`main.py` and `respond.py`), so the CLI and non-FastAPI callers see these variables without
+depending on CWD.
 
 ---
 
@@ -326,8 +365,8 @@ against the old 4% margins and is meaningful now that scores separate.
 
 **Residual limitation:** retrieval quality has been validated against one patient scenario
 (dermatochalasis) and a three-document corpus. It is not known how it behaves at larger
-corpus sizes or for conditions whose guideline vocabulary overlaps more heavily. A reranker
-remains the principled next step.
+corpus sizes or for conditions whose guideline vocabulary overlaps more heavily. Cohere rerank
+is enabled in production (§3); ranking quality at scale remains unvalidated.
 
 ### 5.2 Audit log path fallback
 
@@ -376,18 +415,16 @@ Stated plainly rather than buried.
    `source_page` and `Chunk.index` exist as the anchors it would hang from. Click-to-source
    snippets **are** implemented in the UI (expandable citation quotes); the box overlay is
    the missing half.
-3. **Cohere rerank.** Hybrid BM25 + dense is offered as the PRD's "or equivalent";
-   production runs BM25-only (§3, `RAG_MODE`). A reranker is not wired in.
-4. **Patient scoping on the Week 2 path.** `/respond` does not take a `patient_id` — it
+3. **Patient scoping on the Week 2 path.** `/respond` does not take a `patient_id` — it
    answers about the cached intake fixture. The UI's patient selector is therefore
    **cosmetic in Week 2 mode**. This is a real wart, and it resolves naturally when FHIR
    persistence lands (item 1).
-5. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
+4. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
    dependencies (vector index, reranker reachability), per-worker tracing spans, dashboards
    and alerts, Postman/Bruno collection, backup/RPO/RTO, baseline CPU/memory profiles: not
    addressed.
-6. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
-7. **Lab-to-chart identity reconciliation.** `extract_lab_report` transcribes whichever patient
+5. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
+6. **Lab-to-chart identity reconciliation.** `extract_lab_report` transcribes whichever patient
    the report names. Nothing checks that a report's patient matches the session's patient. In a
    real deployment that check is mandatory before a lab value is shown next to a chart.
 

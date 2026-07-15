@@ -111,6 +111,7 @@ Week 2 adds two capabilities to the Week 1 agent: it can **read clinical documen
 | UI | chat → `/chat` | **chat → `/respond`** (grounded answers, click-to-source citations) |
 | Evals | `agent/evals/` — live suite, ~7 min, spends tokens | `agent/gate/` — 50 offline cases, 0.8 s, $0.00, **blocks pushes** |
 | Authorization | `/ask`, `/chat` had **no auth check** | all three endpoints 401 unauthenticated requests; denials audited with `denial_reason` |
+| Retrieval | — | hybrid BM25 + dense, **Cohere Rerank** (10 candidates → top 3), non-fatal fallback |
 
 **The UI now calls `/respond`.** Week 1's `/chat` and `/ask` endpoints are unchanged and still
 live for API/grader use, but the browser chat box runs the Week 2 pipeline. This is
@@ -199,6 +200,9 @@ change. It runs pre-deploy. Rationale in `W2_ARCHITECTURE.md` §4.
 | `ANTHROPIC_API_KEY` | **yes** | — | VLM extraction + answer composition |
 | `BAA_CONFIRMED` | **yes** | `false` | BAA gate. **Unset or false blocks all PHI access, including `/respond`.** Must be `true` to run the Week 2 flow. |
 | `RAG_MODE` | no | `hybrid` | `hybrid` = BM25 + local dense vectors. **`bm25` = keyword only, skips loading torch.** Production runs `bm25`. |
+| `COHERE_API_KEY` | for rerank | — | Cohere Rerank. **If absent, rerank is skipped and retrieval still works** (logged as `rerank_skipped`). |
+| `RERANK` | no | `off` | `on` enables Cohere Rerank. Production runs `on`. |
+| `COHERE_RERANK_MODEL` | no | `rerank-v3.5` | Rerank model id. |
 | `OPENEMR_BASE_URL` | Week 1 only | — | `/respond` has no OpenEMR dependency |
 | `OPENEMR_CLIENT_ID` / `OPENEMR_CLIENT_SECRET` | Week 1 only | — | |
 | `OPENEMR_USERNAME` / `OPENEMR_PASSWORD` | Week 1 only | — | |
@@ -245,7 +249,7 @@ agent/
 | `W2_COST_LATENCY.md` | p50/p95 latency, bottleneck analysis, cost per operation, dev spend, production projection |
 
 **Read `W2_ARCHITECTURE.md` §7 first.** It lists what is *not* built — FHIR write-back, the lab
-PDF, the bbox overlay, Cohere rerank — plainly rather than buried. Where a
+PDF, the bbox overlay — plainly rather than buried. Where a
 requirement is unmet, it says so.
 
 ### All synthetic data
