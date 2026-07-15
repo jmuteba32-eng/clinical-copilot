@@ -19,12 +19,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+import logging
 import re
 
 import numpy as np
 from rank_bm25 import BM25Okapi
 
 import os
+
+from dotenv import load_dotenv
+
+# Same rationale as main.py and respond.py: resolve agent/.env relative to this
+# file, not the CWD, so `python -m agent.rag.retrieve` from the repo root and the
+# deployed service both find it. A no-op in production, where Railway injects
+# real environment variables.
+load_dotenv(Path(__file__).resolve().parent.parent / ".env")
+
+logger = logging.getLogger("agent.rag")
+
 _RAG_MODE = os.getenv("RAG_MODE", "hybrid").lower()
 
 _GUIDELINES_DIR = Path(__file__).resolve().parent / "guidelines"
@@ -44,6 +56,14 @@ _MAX_CHUNK_CHARS = 600
 # presented to a physician as supporting evidence. A claim's citation must
 # actually support it: weak matches are dropped, not shown.
 _MIN_RELATIVE_SCORE = 0.4
+
+# Cohere Rerank. Off by default: retrieval must work without it.
+_RERANK_ENABLED = os.getenv("RERANK", "off").lower() in ("on", "true", "1")
+_RERANK_MODEL = os.getenv("COHERE_RERANK_MODEL", "rerank-v3.5")
+# Retrieve wide, rerank down. A reranker only earns its cost if the retriever
+# hands it more candidates than the caller wants -- reranking the same 3 chunks
+# the retriever already picked would change almost nothing.
+_CANDIDATE_K = 10
 
 # UNUSED / documented negative result: filtering stopwords out of the query was
 # tried to stop boilerplate appendix pages from out-scoring clinical content.
@@ -171,8 +191,57 @@ def _build_index():
     return chunks, bm25, model, np.asarray(embeddings)
 
 
+def _rerank(query: str, hits: list[EvidenceHit], k: int) -> list[EvidenceHit]:
+    """Reorder candidate hits with Cohere Rerank; return the top k.
+
+    NON-FATAL BY DESIGN. If the key is missing, the model name is wrong, or
+    Cohere is unreachable, this returns the unreranked hits rather than raising.
+    A reranker is a quality improvement on top of retrieval that already works --
+    it must never become a single point of failure that takes the whole clinical
+    answer down. Degradation is logged, not silently swallowed.
+    """
+    if not _RERANK_ENABLED or not hits:
+        return hits[:k]
+
+    api_key = os.getenv("COHERE_API_KEY")
+    if not api_key:
+        logger.warning("rerank_skipped", extra={"event": "rerank_skipped", "reason": "COHERE_API_KEY not set"})
+        return hits[:k]
+
+    try:
+        import cohere
+
+        client = cohere.ClientV2(api_key=api_key)
+        resp = client.rerank(
+            model=_RERANK_MODEL,
+            query=query,
+            documents=[h.chunk.text for h in hits],
+            top_n=min(k, len(hits)),
+        )
+        reranked = [
+            EvidenceHit(chunk=hits[r.index].chunk, score=float(r.relevance_score))
+            for r in resp.results
+        ]
+        logger.info(
+            "rerank_applied",
+            extra={"event": "rerank_applied", "candidates": len(hits), "returned": len(reranked), "model": _RERANK_MODEL},
+        )
+        return reranked
+    except Exception as exc:
+        logger.warning(
+            "rerank_failed",
+            extra={"event": "rerank_failed", "reason": type(exc).__name__, "detail": str(exc)[:200]},
+        )
+        return hits[:k]
+
+
 def retrieve_evidence(query: str, k: int = 3) -> list[EvidenceHit]:
-    """Return top-k guideline chunks for a query, scored by hybrid BM25+dense (or BM25 only if RAG_MODE=bm25)."""
+    """Return the top-k guideline chunks for a query.
+
+    Pipeline: hybrid BM25 + dense scoring over the whole corpus (or BM25 only
+    when RAG_MODE=bm25) -> take _CANDIDATE_K candidates -> Cohere Rerank picks
+    the final k (when RERANK=on) -> relative-score floor drops weak matches.
+    """
     chunks, bm25, model, embeddings = _build_index()
 
     bm25_scores = np.asarray(bm25.get_scores(_tokenize(query)), dtype=float)
@@ -184,13 +253,21 @@ def retrieve_evidence(query: str, k: int = 3) -> list[EvidenceHit]:
         dense_scores = embeddings @ np.asarray(q_emb)
         combined = _minmax(bm25_scores) + _minmax(dense_scores)
 
-    top_idx = np.argsort(combined)[::-1][:k]
-    hits = [EvidenceHit(chunk=chunks[i], score=float(combined[i])) for i in top_idx]
+    # Wide candidate pool when reranking; otherwise just what the caller asked for.
+    pool = _CANDIDATE_K if _RERANK_ENABLED else k
+    top_idx = np.argsort(combined)[::-1][:pool]
+    candidates = [EvidenceHit(chunk=chunks[i], score=float(combined[i])) for i in top_idx]
 
-    if not hits or hits[0].score <= 0:
+    if not candidates or candidates[0].score <= 0:
         return []
-    cutoff = hits[0].score * _MIN_RELATIVE_SCORE
-    return [h for h in hits if h.score >= cutoff]
+
+    if _RERANK_ENABLED:
+        # Cohere returns its own relevance scale, so the retriever's relative
+        # floor no longer applies -- the reranker IS the relevance judgement.
+        return _rerank(query, candidates, k)
+
+    cutoff = candidates[0].score * _MIN_RELATIVE_SCORE
+    return [h for h in candidates if h.score >= cutoff][:k]
 
 
 if __name__ == "__main__":
