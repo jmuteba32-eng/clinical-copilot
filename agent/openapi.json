@@ -1,0 +1,851 @@
+{
+  "components": {
+    "schemas": {
+      "AskRequest": {
+        "properties": {
+          "patient_id": {
+            "description": "The FHIR Patient resource ID.",
+            "minLength": 1,
+            "title": "Patient Id",
+            "type": "string"
+          },
+          "question": {
+            "description": "The physician's natural-language question about this patient.",
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "patient_id",
+          "question"
+        ],
+        "title": "AskRequest",
+        "type": "object"
+      },
+      "AskResponse": {
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "tool_calls": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "title": "Tool Calls",
+            "type": "array"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/VerificationResult"
+          }
+        },
+        "required": [
+          "answer",
+          "tool_calls",
+          "verification",
+          "correlation_id"
+        ],
+        "title": "AskResponse",
+        "type": "object"
+      },
+      "AuditRecord": {
+        "description": "One immutable access event \u2014 no PHI fields.",
+        "properties": {
+          "correlation_id": {
+            "description": "Request correlation ID for joining to server logs.",
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "denial_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why a request was refused or denied, when applicable.",
+            "title": "Denial Reason"
+          },
+          "event_type": {
+            "enum": [
+              "login",
+              "patient_access",
+              "access_refused",
+              "logout",
+              "baa_gate_blocked",
+              "ask",
+              "chat",
+              "respond"
+            ],
+            "title": "Event Type",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "Result of the event (e.g. success, failure, refused).",
+            "title": "Outcome",
+            "type": "string"
+          },
+          "patient_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Opaque FHIR Patient resource UUID when the event concerns a chart.",
+            "title": "Patient Id"
+          },
+          "timestamp": {
+            "description": "UTC ISO-8601 time the event was recorded.",
+            "title": "Timestamp",
+            "type": "string"
+          },
+          "username": {
+            "description": "Authenticated UI user, or 'unauthenticated' for API-only calls.",
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp",
+          "username",
+          "event_type",
+          "correlation_id",
+          "outcome"
+        ],
+        "title": "AuditRecord",
+        "type": "object"
+      },
+      "ChatRequest": {
+        "properties": {
+          "conversation_history": {
+            "description": "Prior user/assistant turns for this session, in order.",
+            "items": {
+              "$ref": "#/components/schemas/ChatTurn"
+            },
+            "title": "Conversation History",
+            "type": "array"
+          },
+          "message": {
+            "description": "The physician's current message in this session.",
+            "minLength": 1,
+            "title": "Message",
+            "type": "string"
+          },
+          "patient_id": {
+            "description": "The FHIR Patient resource ID \u2014 fixed for the whole session.",
+            "minLength": 1,
+            "title": "Patient Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "patient_id",
+          "message"
+        ],
+        "title": "ChatRequest",
+        "type": "object"
+      },
+      "ChatResponse": {
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "updated_conversation_history": {
+            "items": {
+              "$ref": "#/components/schemas/ChatTurn"
+            },
+            "title": "Updated Conversation History",
+            "type": "array"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/VerificationResult"
+          }
+        },
+        "required": [
+          "answer",
+          "verification",
+          "correlation_id",
+          "updated_conversation_history"
+        ],
+        "title": "ChatResponse",
+        "type": "object"
+      },
+      "ChatTurn": {
+        "properties": {
+          "content": {
+            "description": "Prior turn text (published Q&A only, not tool blocks).",
+            "minLength": 1,
+            "title": "Content",
+            "type": "string"
+          },
+          "role": {
+            "description": "Prior turn role in this session.",
+            "pattern": "^(user|assistant)$",
+            "title": "Role",
+            "type": "string"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "ChatTurn",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "LoginRequest": {
+        "properties": {
+          "password": {
+            "minLength": 1,
+            "title": "Password",
+            "type": "string"
+          },
+          "username": {
+            "minLength": 1,
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "username",
+          "password"
+        ],
+        "title": "LoginRequest",
+        "type": "object"
+      },
+      "LoginResponse": {
+        "properties": {
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "username": {
+            "title": "Username",
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "username"
+        ],
+        "title": "LoginResponse",
+        "type": "object"
+      },
+      "PatientSummary": {
+        "description": "Picker row for GET /patients \u2014 chart identification, not agent clinical output.\n\n``name`` is included so physicians can select the right chart. The agent's\n``get_intake`` tool deliberately omits name (minimum-necessary PHI for Q&A).",
+        "properties": {
+          "age": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Age"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "sex": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sex"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "title": "PatientSummary",
+        "type": "object"
+      },
+      "RespondCitation": {
+        "properties": {
+          "field_or_chunk_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field Or Chunk Id"
+          },
+          "page_or_section": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page Or Section"
+          },
+          "quote_or_value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quote Or Value"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "source_type": {
+            "title": "Source Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_type",
+          "source_id"
+        ],
+        "title": "RespondCitation",
+        "type": "object"
+      },
+      "RespondHandoff": {
+        "description": "One supervisor/worker routing step. Routing metadata only, no PHI.",
+        "properties": {
+          "from": {
+            "title": "From",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "to": {
+            "title": "To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "from",
+          "to",
+          "reason"
+        ],
+        "title": "RespondHandoff",
+        "type": "object"
+      },
+      "RespondRequest": {
+        "properties": {
+          "patient_id": {
+            "description": "The FHIR Patient resource ID this question is scoped to.",
+            "minLength": 1,
+            "title": "Patient Id",
+            "type": "string"
+          },
+          "question": {
+            "description": "The physician's natural-language question. Routed through the Week 2 grounded-answer pipeline (scope classification, hybrid RAG retrieval, cited answer).",
+            "minLength": 1,
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "patient_id",
+          "question"
+        ],
+        "title": "RespondRequest",
+        "type": "object"
+      },
+      "RespondResponse": {
+        "properties": {
+          "answer": {
+            "title": "Answer",
+            "type": "string"
+          },
+          "citations": {
+            "items": {
+              "$ref": "#/components/schemas/RespondCitation"
+            },
+            "title": "Citations",
+            "type": "array"
+          },
+          "correlation_id": {
+            "title": "Correlation Id",
+            "type": "string"
+          },
+          "handoffs": {
+            "items": {
+              "$ref": "#/components/schemas/RespondHandoff"
+            },
+            "title": "Handoffs",
+            "type": "array"
+          },
+          "refusal_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Refusal Reason"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "scope",
+          "verified",
+          "answer",
+          "correlation_id"
+        ],
+        "title": "RespondResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      },
+      "VerificationResult": {
+        "description": "Outcome of checking one agent answer against the records it actually retrieved.\n\n`passed` is `False` if ANY of the three checks below found something --\nthere is no partial-credit notion of \"mostly verified\" here, because\nthe whole point is that a physician reading a failed result should not\nhave to guess which parts are trustworthy.",
+        "properties": {
+          "boundary_violations": {
+            "description": "Exact prescriptive/diagnostic phrases (e.g. 'increase the dose') found in the answer text. The agent surfaces sourced data; the physician decides -- any match here is a hard rule violation, not a judgment call. Not one of the four fields requested in the original spec, but included because requirement 4 (main.py showing 'what failed') needs somewhere to put this check's result; omitting it would make a boundary-violation failure look identical to a clean pass except for `passed=False`, with no way to tell a physician (or a log line) which of the three checks failed.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Boundary Violations",
+            "type": "array"
+          },
+          "checked_claims": {
+            "default": 0,
+            "description": "Total sentences classified as clinical claims (cited + uncited) -- i.e. how much of the answer this module actually evaluated for citation, as opposed to skipped as non-clinical/permitted-uncited prose.",
+            "title": "Checked Claims",
+            "type": "integer"
+          },
+          "hallucinated_sources": {
+            "description": "Citations of the form 'ResourceType/id' that appeared in the answer text but do not match any record actually retrieved by a tool call this turn. Non-empty here means the model cited a source that does not exist -- the single most dangerous failure mode this module exists to catch.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Hallucinated Sources",
+            "type": "array"
+          },
+          "passed": {
+            "title": "Passed",
+            "type": "boolean"
+          },
+          "uncited_claims": {
+            "description": "Sentences that read as clinical assertions but carry no [ResourceType/id] citation at all. Heuristic -- see agent/verification.py's module docstring for what this does and does not catch.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Uncited Claims",
+            "type": "array"
+          }
+        },
+        "required": [
+          "passed"
+        ],
+        "title": "VerificationResult",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "title": "Clinical Co-Pilot",
+    "version": "0.1.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/": {
+      "get": {
+        "description": "Clinical chat UI \u2014 self-contained HTML, no build step.",
+        "operationId": "index__get",
+        "responses": {
+          "200": {
+            "content": {
+              "text/html": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Index"
+      }
+    },
+    "/ask": {
+      "post": {
+        "operationId": "ask_ask_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AskRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AskResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ask"
+      }
+    },
+    "/audit": {
+      "get": {
+        "description": "Return append-only access audit records (newest first). Requires UI session.",
+        "operationId": "get_audit_audit_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AuditRecord"
+                  },
+                  "title": "Response Get Audit Audit Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Audit"
+      }
+    },
+    "/baa-status": {
+      "get": {
+        "description": "Whether an administrator has attested a BAA for the configured LLM provider.",
+        "operationId": "baa_status_baa_status_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Baa Status Baa Status Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Baa Status"
+      }
+    },
+    "/chat": {
+      "post": {
+        "operationId": "chat_chat_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Chat"
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Liveness: is the process alive? No dependency checks -- see explanation.",
+        "operationId": "health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "string"
+                  },
+                  "title": "Response Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Health"
+      }
+    },
+    "/login": {
+      "post": {
+        "description": "MVP physician login \u2014 accepts configured credentials, returns an in-memory session token.",
+        "operationId": "login_login_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LoginRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LoginResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Login"
+      }
+    },
+    "/logout": {
+      "post": {
+        "description": "End the in-memory UI session and record a logout audit event.",
+        "operationId": "logout_logout_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Logout"
+      }
+    },
+    "/patients": {
+      "get": {
+        "description": "Minimum-necessary patient list for the UI picker (id, age, sex only).\n\nUses the same code path as ``python -m agent.list_patients``: a fresh\n``OpenEMRClient`` context per request (not the lifespan singleton), so\nauth + FHIR search behave identically to the working CLI utility.",
+        "operationId": "list_patients_patients_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PatientSummary"
+                  },
+                  "title": "Response List Patients Patients Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "List Patients"
+      }
+    },
+    "/ready": {
+      "get": {
+        "description": "Readiness: can this instance actually serve an /ask request right now?\n\nChecks the two things `answer()` cannot function without: an\nANTHROPIC_API_KEY, and a working OpenEMR authentication. Deliberately\ndoes NOT make a FHIR data call -- \"can we authenticate\" and \"can we read\na specific resource type\" are different failure modes (the latter also\ndepends on per-resource scope/ACL grants), and this endpoint is scoped\nto the former.\n\nUses `openemr_client.readiness_timeout_seconds` here rather than the\nclient's default (`OPENEMR_TIMEOUT_SECONDS`, which bounds a live tool\ncall during a physician's question): OpenEMR has no caching layer and\n10-40+ queries go into assembling one patient's picture (per AUDIT.md),\nand this deployment runs on Railway's free tier, which cold-starts\nslowly. A readiness probe can afford to wait that out; a physician\nwaiting on an actual answer cannot -- which is exactly why this\nproject's architecture pre-computes summaries rather than synthesizing\neverything live on every question.\n\nReports each dependency separately rather than a single binary verdict,\nbecause they are not equally fatal. Anthropic, document storage, and the\nguideline corpus are HARD: without them this service cannot answer at all.\nOpenEMR and the reranker are SOFT: the document path answers without either,\nso their absence degrades quality or coverage rather than stopping the\nservice. Collapsing all five into up/down would report a 503 for a process\nthat can still answer -- which is how a readiness probe ends up lying.",
+        "operationId": "ready_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Ready"
+      }
+    },
+    "/respond": {
+      "post": {
+        "description": "Week 2 grounded-answer pipeline: scope -> hybrid RAG -> cited answer.\n\nReuses the Week 1 BAA gate and correlation-ID/PHI-safe logging. The\nquestion text is never logged (it can restate chart specifics); only\nmetadata is recorded, exactly as /ask does.",
+        "operationId": "respond_endpoint_respond_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RespondRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RespondResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Respond Endpoint"
+      }
+    }
+  }
+}
