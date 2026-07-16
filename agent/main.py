@@ -1037,36 +1037,44 @@ async def respond_endpoint(
 
     from agent.pipeline.respond import respond as _run_pipeline
 
-    grounded = await asyncio.to_thread(_run_pipeline, payload.question, correlation_id)
+    # Root span for this request. Every graph worker span nests under it:
+    # asyncio.to_thread copies the contextvars context, which is what
+    # OpenTelemetry propagates through, so the graph's spans land inside this
+    # trace without threading a trace object through graph state.
+    with observability.trace_respond_request(
+        correlation_id=correlation_id, patient_id=payload.patient_id, question_length=len(payload.question)
+    ) as trace:
+        grounded = await asyncio.to_thread(_run_pipeline, payload.question, correlation_id)
+        trace.score_trace(name="verified", value=1 if grounded.verified else 0, data_type="BOOLEAN")
 
-    # Audit EVERY handled request, not just denials. A successful answer is the
-    # event most worth recording: it is the one where PHI-derived content reached
-    # a user. Week 1 feedback asked for user, correlation id, action, result, and
-    # denial reason "for each request" -- a log that records only refusals is
-    # backwards.
-    #
-    # patient_id is the real FHIR Patient id the physician selected. The request
-    # only reaches here if has_documents_for() confirmed we hold ingested
-    # documents for that patient, so the audited id and the answered-about
-    # patient are the same person.
-    _record_audit(
-        request,
-        event_type="respond",
-        outcome="success" if grounded.scope == "in_scope" else "refused",
-        patient_id=payload.patient_id,
-        correlation_id=correlation_id,
-        denial_reason=grounded.refusal_reason,
-    )
+        # Audit EVERY handled request, not just denials. A successful answer is the
+        # event most worth recording: it is the one where PHI-derived content reached
+        # a user. Week 1 feedback asked for user, correlation id, action, result, and
+        # denial reason "for each request" -- a log that records only refusals is
+        # backwards.
+        #
+        # patient_id is the real FHIR Patient id the physician selected. The request
+        # only reaches here if has_documents_for() confirmed we hold ingested
+        # documents for that patient, so the audited id and the answered-about
+        # patient are the same person.
+        _record_audit(
+            request,
+            event_type="respond",
+            outcome="success" if grounded.scope == "in_scope" else "refused",
+            patient_id=payload.patient_id,
+            correlation_id=correlation_id,
+            denial_reason=grounded.refusal_reason,
+        )
 
-    return RespondResponse(
-        scope=grounded.scope,
-        verified=grounded.verified,
-        answer=grounded.answer_text,
-        refusal_reason=grounded.refusal_reason,
-        citations=[RespondCitation(**c.model_dump()) for c in grounded.citations],
-        handoffs=[RespondHandoff(**h) for h in grounded.handoffs],
-        correlation_id=correlation_id,
-    )
+        return RespondResponse(
+            scope=grounded.scope,
+            verified=grounded.verified,
+            answer=grounded.answer_text,
+            refusal_reason=grounded.refusal_reason,
+            citations=[RespondCitation(**c.model_dump()) for c in grounded.citations],
+            handoffs=[RespondHandoff(**h) for h in grounded.handoffs],
+            correlation_id=correlation_id,
+        )
 
 
 @app.post("/ask", response_model=AskResponse)

@@ -210,14 +210,17 @@ def _rerank(query: str, hits: list[EvidenceHit], k: int) -> list[EvidenceHit]:
 
     try:
         import cohere
+        from agent import observability
 
         client = cohere.ClientV2(api_key=api_key)
-        resp = client.rerank(
-            model=_RERANK_MODEL,
-            query=query,
-            documents=[h.chunk.text for h in hits],
-            top_n=min(k, len(hits)),
-        )
+        with observability.trace_rerank(model=_RERANK_MODEL, candidates=len(hits)) as span:
+            resp = client.rerank(
+                model=_RERANK_MODEL,
+                query=query,
+                documents=[h.chunk.text for h in hits],
+                top_n=min(k, len(hits)),
+            )
+            span.update(output={"returned": len(resp.results)})
         reranked = [
             EvidenceHit(chunk=hits[r.index].chunk, score=float(r.relevance_score))
             for r in resp.results

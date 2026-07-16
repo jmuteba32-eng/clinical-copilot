@@ -107,6 +107,16 @@ _ALLOWED_METADATA_KEYS: Final[frozenset[str]] = frozenset(
         "boundary_violations",
         "checked_claims",
         "verification",
+        # Week 2 graph worker spans -- routing metadata and counts only.
+        "worker",
+        "scope",
+        "routed_to",
+        "fields_extracted",
+        "chunks_retrieved",
+        "returned",
+        "refused",
+        "candidates",
+        "verified",
     }
 )
 
@@ -376,6 +386,46 @@ def trace_patient_existence_check() -> AbstractContextManager[_SafeObservation]:
     happens before the agent is invoked at all (see `main.py`).
     """
     return _observe(as_type="span", name="patient_existence_check")
+
+
+def trace_respond_request(*, correlation_id: str, patient_id: str, question_length: int) -> AbstractContextManager[_SafeObservation]:
+    """Root span for one /respond request -- the Week 2 grounded-answer pipeline.
+
+    Mirrors trace_ask_request: one Langfuse trace per request, id derived from
+    correlation_id, so a Week 2 trace joins back to this app's structured logs
+    the same way a Week 1 trace does. Every worker span below nests under this.
+    """
+    trace_context: Optional[dict[str, str]] = None
+    if _client is not None:
+        try:
+            trace_context = {"trace_id": _client.create_trace_id(seed=correlation_id)}
+        except Exception:
+            logger.warning("langfuse_trace_id_failed", extra={"event": "langfuse_trace_id_failed"}, exc_info=True)
+
+    return _observe(
+        as_type="span",
+        name="respond_request",
+        trace_context=trace_context,
+        input_data={"patient_id": patient_id, "question_length": question_length},
+        metadata={"correlation_id": correlation_id},
+    )
+
+
+def trace_worker(*, worker: str) -> AbstractContextManager[_SafeObservation]:
+    """One span per graph node invocation, nested under the request trace.
+
+    The rubric requires each worker invocation be a child span of the supervisor
+    span. Because the graph runs inside the request's trace context, and
+    asyncio.to_thread copies contextvars (which is what OpenTelemetry propagates
+    through), these nest automatically without threading the trace object through
+    graph state.
+    """
+    return _observe(as_type="span", name=f"worker:{worker}", input_data={"worker": worker})
+
+
+def trace_rerank(*, model: str, candidates: int) -> AbstractContextManager[_SafeObservation]:
+    """One span per Cohere Rerank call, nested inside the evidence_retriever worker."""
+    return _observe(as_type="span", name="rerank", input_data={"model": model, "candidates": candidates})
 
 
 def llm_usage_and_cost(*, model: str, input_tokens: Optional[int], output_tokens: Optional[int]) -> tuple[Optional[dict[str, int]], Optional[dict[str, float]]]:
