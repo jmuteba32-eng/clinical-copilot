@@ -719,6 +719,96 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+async def _check_dependencies(request: Request, openemr_client: OpenEMRClient) -> tuple[dict[str, str], list[str]]:
+    """Per-dependency readiness. Returns (checks, notes).
+
+    Each value is one of:
+      ok             -- reachable / present / usable
+      unavailable    -- configured, but not usable right now
+      not_configured -- deliberately switched off (not a fault)
+    """
+    checks: dict[str, str] = {}
+    notes: list[str] = []
+
+    # --- Anthropic: HARD dependency. No key, no answers, no extraction. ---
+    checks["anthropic"] = "ok" if os.environ.get("ANTHROPIC_API_KEY") else "unavailable"
+    if checks["anthropic"] != "ok":
+        notes.append("ANTHROPIC_API_KEY is not set")
+
+    # --- OpenEMR: SOFT dependency, deliberately. ---
+    # The Week 2 document path (/respond for a patient with ingested documents)
+    # never touches OpenEMR. Only the chart-fallback path and Week 1's
+    # /ask + /chat do. So an unreachable OpenEMR degrades this service; it does
+    # not down it -- and reporting 503 here would be a lie about a process that
+    # can still answer for the ingested patient. This instance is a Railway free
+    # tier that cold-starts slowly, so this distinction is not theoretical.
+    try:
+        await openemr_client.ensure_authenticated(timeout_seconds=openemr_client.readiness_timeout_seconds)
+        checks["openemr"] = "ok"
+    except Exception as exc:
+        checks["openemr"] = "unavailable"
+        notes.append(f"OpenEMR authentication failed: {type(exc).__name__}")
+
+    # --- Document storage: HARD. Where ingested documents live. ---
+    try:
+        from agent.pipeline.respond import _INTAKE_FIXTURE
+
+        if _INTAKE_FIXTURE.is_file() and _INTAKE_FIXTURE.stat().st_size > 0:
+            checks["document_storage"] = "ok"
+        else:
+            checks["document_storage"] = "unavailable"
+            notes.append("ingested document store is empty or unreadable")
+    except Exception as exc:
+        checks["document_storage"] = "unavailable"
+        notes.append(f"document storage check failed: {type(exc).__name__}")
+
+    # --- Vector index: HARD. The guideline corpus. ---
+    # Checks the corpus is PRESENT and readable, not that the index is built.
+    # Building it reads every PDF and (in hybrid mode) loads an embedding model
+    # -- far too expensive to do on every readiness probe. A missing corpus is
+    # the failure this can actually catch; a slow first build is not a fault.
+    try:
+        from agent.rag.retrieve import _GUIDELINES_DIR, _build_index
+
+        pdfs = list(_GUIDELINES_DIR.glob("*.pdf")) if _GUIDELINES_DIR.is_dir() else []
+        if pdfs:
+            warm = _build_index.cache_info().currsize > 0
+            checks["vector_index"] = "ok"
+            notes.append(f"guideline corpus: {len(pdfs)} documents, index {'warm' if warm else 'cold'}")
+        else:
+            checks["vector_index"] = "unavailable"
+            notes.append(f"no guideline documents found in {_GUIDELINES_DIR.name}/")
+    except Exception as exc:
+        checks["vector_index"] = "unavailable"
+        notes.append(f"vector index check failed: {type(exc).__name__}")
+
+    # --- Reranker: SOFT by design. ---
+    # _rerank() falls back to unreranked hits on any failure, so an unreachable
+    # Cohere degrades answer quality; it does not stop answers. This checks
+    # configuration, not live reachability: a readiness probe runs on a schedule,
+    # and billing a rerank call every probe to learn something that is non-fatal
+    # anyway is the wrong trade. A failed live call is surfaced at request time
+    # as `rerank_failed`.
+    try:
+        from agent.rag.retrieve import _RERANK_ENABLED
+
+        if not _RERANK_ENABLED:
+            checks["reranker"] = "not_configured"
+            notes.append("RERANK is off; retrieval runs without reranking")
+        elif not os.environ.get("COHERE_API_KEY"):
+            checks["reranker"] = "unavailable"
+            notes.append("RERANK is on but COHERE_API_KEY is not set")
+        else:
+            import cohere  # noqa: F401
+
+            checks["reranker"] = "ok"
+    except Exception as exc:
+        checks["reranker"] = "unavailable"
+        notes.append(f"reranker check failed: {type(exc).__name__}")
+
+    return checks, notes
+
+
 @app.get("/ready")
 async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_openemr_client)) -> Response:
     """Readiness: can this instance actually serve an /ask request right now?
@@ -739,25 +829,47 @@ async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_op
     waiting on an actual answer cannot -- which is exactly why this
     project's architecture pre-computes summaries rather than synthesizing
     everything live on every question.
+
+    Reports each dependency separately rather than a single binary verdict,
+    because they are not equally fatal. Anthropic, document storage, and the
+    guideline corpus are HARD: without them this service cannot answer at all.
+    OpenEMR and the reranker are SOFT: the document path answers without either,
+    so their absence degrades quality or coverage rather than stopping the
+    service. Collapsing all five into up/down would report a 503 for a process
+    that can still answer -- which is how a readiness probe ends up lying.
     """
-    failures: list[str] = []
+    _HARD = ("anthropic", "document_storage", "vector_index")
 
-    if not os.environ.get("ANTHROPIC_API_KEY"):
-        failures.append("ANTHROPIC_API_KEY is not set")
+    checks, notes = await _check_dependencies(request, openemr_client)
+    correlation_id = _correlation_id_for(request)
 
-    try:
-        await openemr_client.ensure_authenticated(timeout_seconds=openemr_client.readiness_timeout_seconds)
-    except OpenEMRClientError as exc:
-        failures.append(f"OpenEMR authentication failed: {exc}")
+    hard_down = [k for k in _HARD if checks.get(k) != "ok"]
+    soft_down = [k for k, v in checks.items() if k not in _HARD and v == "unavailable"]
 
-    if failures:
-        logger.warning(
-            "readiness_check_failed",
-            extra={"event": "readiness_check_failed", "failures": failures, "correlation_id": _correlation_id_for(request)},
-        )
-        return JSONResponse(status_code=503, content={"status": "not_ready", "failures": failures})
+    if hard_down:
+        status, code = "not_ready", 503
+    elif soft_down:
+        status, code = "degraded", 200
+    else:
+        status, code = "ready", 200
 
-    return JSONResponse(status_code=200, content={"status": "ready"})
+    log_fn = logger.warning if status != "ready" else logger.info
+    log_fn(
+        "readiness_check",
+        extra={
+            "event": "readiness_check",
+            "correlation_id": correlation_id,
+            "status": status,
+            "checks": checks,
+            "hard_down": hard_down,
+            "soft_down": soft_down,
+        },
+    )
+
+    return JSONResponse(
+        status_code=code,
+        content={"status": status, "checks": checks, "notes": notes, "correlation_id": correlation_id},
+    )
 
 
 @app.post("/respond", response_model=RespondResponse)
