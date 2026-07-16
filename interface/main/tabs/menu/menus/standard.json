@@ -1,5 +1,17 @@
 [
     {
+        "label": "Co-Pilot",
+        "menu_id": "cop0",
+        "target": "cop",
+        "url": "https://agent-production-b516.up.railway.app/",
+        "children": [],
+        "requirement": 0,
+        "acl_req": [
+            "patients",
+            "demo"
+        ]
+    },
+    {
         "label": "Calendar",
         "menu_id": "cal0",
         "target": "cal",
