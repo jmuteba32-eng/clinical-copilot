@@ -864,6 +864,27 @@ async def respond_endpoint(
                 correlation_id=correlation_id,
             )
 
+        # Week 1's verification layer, on the Week 1 answer it just produced.
+        # This path returns [ResourceType/id] citations, which is exactly what
+        # verify() checks -- hallucinated source ids, uncited clinical claims,
+        # and boundary violations. The document path cannot use it as-is: it
+        # cites [n] markers, so verify() would find zero citations and flag every
+        # claim as uncited. That path uses hallucinated_markers() instead. The two
+        # paths verify at different strengths and W2_ARCHITECTURE.md says so.
+        chart_verification = verify(result["answer"], records_for_verification(result["records"], session_chart))
+        logger.info(
+            "chart_fallback_verified",
+            extra={
+                "event": "chart_fallback_verified",
+                "correlation_id": correlation_id,
+                "passed": chart_verification.passed,
+                "hallucinated_source_count": len(chart_verification.hallucinated_sources),
+                "uncited_claim_count": len(chart_verification.uncited_claims),
+                "boundary_violation_count": len(chart_verification.boundary_violations),
+                "checked_claims": chart_verification.checked_claims,
+            },
+        )
+
         # Week 1 records carry their own source citations (SourcedRecord).
         chart_citations = [
             RespondCitation(
@@ -886,7 +907,7 @@ async def respond_endpoint(
 
         return RespondResponse(
             scope="in_scope",
-            verified=len(chart_citations) > 0,
+            verified=chart_verification.passed and len(chart_citations) > 0,
             answer=result["answer"],
             refusal_reason=None,
             citations=chart_citations,

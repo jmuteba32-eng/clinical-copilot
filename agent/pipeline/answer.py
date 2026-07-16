@@ -40,6 +40,23 @@ _OUT_OF_SCOPE_PATTERNS = (
     re.compile(r"\b(weather|capital|president|movie|song|sports|celebrity|recipe)\b", re.I),
 )
 
+# Answers cite retrieved evidence by [n] marker. A marker with no corresponding
+# citation is a hallucinated source -- the same defect Week 1's verify() catches
+# for [ResourceType/id] citations, in the notation the Week 2 answer uses.
+_MARKER_RE = re.compile(r"\[(\d+)\]")
+
+
+def hallucinated_markers(answer_text: str, citations: list["Citation"]) -> list[int]:
+    """Citation markers in the answer that point at evidence that was never retrieved.
+
+    If the model writes [4] and only three chunks were retrieved, [4] refers to
+    nothing. That is a fabricated citation, and an answer carrying one must not
+    be Verified.
+    """
+    cited = {int(m) for m in _MARKER_RE.findall(answer_text)}
+    valid = set(range(1, len(citations) + 1))
+    return sorted(cited - valid)
+
 
 class Citation(BaseModel):
     """Machine-readable citation. Mirrors the PRD citation shape."""
@@ -71,11 +88,14 @@ class GroundedAnswer(BaseModel):
 
     def model_post_init(self, __context) -> None:
         # Enforce the invariant structurally: no citations => not verified;
-        # out-of-scope => never verified. This is the "Verified must mean
-        # verified" guarantee, made impossible to violate by construction.
+        # out-of-scope => never verified; a citation marker pointing at evidence
+        # that was never retrieved => never verified. This is the "Verified must
+        # mean verified" guarantee, made impossible to violate by construction.
         object.__setattr__(
             self, "verified",
-            self.scope == "in_scope" and len(self.citations) > 0,
+            self.scope == "in_scope"
+            and len(self.citations) > 0
+            and not hallucinated_markers(self.answer_text, self.citations),
         )
 
 
