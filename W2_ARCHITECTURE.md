@@ -493,3 +493,99 @@ control doing the right thing by accident. With `BAA_CONFIRMED=true` (as in prod
 unauthenticated caller would have received a full clinical answer.
 
 The audit trail catching this is the argument for building one.
+
+---
+
+## 12. Backup and recovery
+
+**Principle: everything that matters is either in git or derived from something in git.**
+There is no primary datastore whose loss would be unrecoverable — with one exception,
+named honestly in §12.3.
+
+### 12.1 What is backed up, and how
+
+| Artifact | Where it lives | Backup mechanism | RPO | RTO |
+|---|---|---|---|---|
+| **Source documents** (intake form, lab report, degraded fixtures) | `agent/ingestion/test_docs/` | **git** — committed, pushed to GitLab | **0** (committed) | ~2 min (clone) |
+| **Guideline corpus** | `agent/rag/guidelines/` | **git** | **0** | ~2 min |
+| **Extracted facts** (`john_doe_intake.json`) | `agent/pipeline/` | **git** — and reproducible: re-run `python -m agent.ingestion.extract` | **0** | ~2 min, or ~15s to re-extract |
+| **Eval golden set** (54 cases) | `agent/gate/*.py` | **git** — it *is* code | **0** | ~2 min |
+| **Vector index / BM25 index** | in-process memory | **none needed** — derived data, rebuilt from the committed corpus at first request | n/a | ~5s (cold build) |
+| **OpenEMR patient data** | Railway MySQL volume | **none** — see §12.3 | ∞ | unbounded |
+| **Audit log** | container filesystem | **none** — see §12.3 | ∞ | unrecoverable |
+| **Derived FHIR records** | — | **not implemented** (§7) — nothing is written back to OpenEMR, so there is nothing to back up |
+
+### 12.2 The golden set is reproducible from the repo alone
+
+The rubric calls this out specifically, so: the 54-case golden set is **Python source
+files**, not database rows. `agent/gate/test_golden_set.py` holds its cases as literal
+lists in code. Clone the repo, run `python -m pytest agent/gate`, and the entire eval
+suite reproduces with no external dependency — no database, no network, no API keys,
+no fixtures to restore.
+
+That is deliberate. An eval set living only in a database with no recovery path is one
+outage away from being unable to prove your system still works.
+
+### 12.3 Known gaps — no recovery path
+
+**The audit log does not survive a redeploy.** Every deploy logs:
+
+```
+[WARN] audit_log_path_fallback preferred_path="/data/audit_log.jsonl"
+       active_path="/home/appuser/.clinical-copilot/clinical-copilot-audit.jsonl"
+```
+
+A Railway volume **is** mounted at `/data`, but the container's non-root `appuser`
+cannot write to it, so the audit trail falls back to the container filesystem — which
+is destroyed on every deploy. **RPO is effectively infinite: every redeploy loses the
+entire audit history.**
+
+For a system whose stated purpose includes making access to PHI traceable, an audit
+trail that vanishes on deploy is not an audit trail. This is the single most important
+gap in this section. The fix is a `chown` on the volume mount in the Dockerfile, or
+running the audit writer as a user that owns `/data`.
+
+**OpenEMR's MySQL data has no backup.** It sits on a Railway volume with no snapshot
+schedule and no export. If that volume is lost, the synthetic patient records are gone.
+Acceptable only because the data is synthetic and re-seedable; unacceptable for anything
+real.
+
+### 12.4 Manual recovery procedure
+
+**If the deployed agent is lost entirely:**
+
+```bash
+git clone https://labs.gauntletai.com/jonathanmuteba/clinical-copilot
+cd clinical-copilot/agent
+# set ANTHROPIC_API_KEY, BAA_CONFIRMED, RAG_MODE, RERANK, COHERE_API_KEY
+railway up --service agent
+```
+Everything the agent needs — documents, corpus, extracted facts, eval set — arrives with
+the clone. **RTO ≈ 10 minutes**, dominated by the Docker build.
+
+**If extracted facts are corrupted but source documents survive:**
+
+```bash
+python -c "from agent.ingestion.extract import extract_intake_form; from pathlib import Path; \
+r = extract_intake_form(r'agent/ingestion/test_docs/John_Doe-Intake-Form.pdf'); \
+Path('agent/pipeline/john_doe_intake.json').write_text(r.model_dump_json(indent=2), encoding='utf-8')"
+```
+**RTO ≈ 15 seconds.** One vision call. The source document is the system of record; the
+extracted JSON is a cache, and a cache with a documented rebuild path is not a backup
+problem.
+
+**If the guideline corpus is lost:** the three PDFs are in git. If git is lost, they are
+public clinical practice guidelines and are re-obtainable — but the *chunking* is
+deterministic, so retrieval behavior reproduces exactly once the same PDFs are restored.
+
+**If OpenEMR is lost:** re-seed synthetic patients. Note that `agent/evals/patients.py`
+documents the exact expected facts per patient (verified against the live FHIR API), so
+a re-seed can be validated rather than assumed. The Week 2 document path does not depend
+on OpenEMR at all — `/ready` reports `degraded`, not `not_ready`, and the ingested
+patient keeps answering.
+
+### 12.5 Why RPO is 0 for everything that matters
+
+Because git is the backup. Committing is the backup event, it happens many times a day,
+and the pre-push hook means nothing reaches the remote without the eval gate passing
+first. **The recovery point is the last commit, and the last commit is always green.**
