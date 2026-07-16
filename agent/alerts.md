@@ -11,9 +11,12 @@ availability.
 
 | # | Alert | Class |
 |---|-------|-------|
-| 1 | Verification failure rate > 5% / 15 min | **Patient safety** |
+| 1 | Verification failure rate > 5% / 15 min (`/ask`) | **Patient safety** |
 | 2 | p95 `/ask` latency > 10s / 10 min | Availability / performance |
 | 3 | `/ready` returning 503 for > 2 min | Availability |
+| 4 | `/respond` verified rate < 95% / 15 min | **Patient safety** |
+| 5 | Eval category regression > 5% | **Patient safety** (CI, not prod) |
+| 6 | Extraction failure rate > 5% / 15 min | **Patient safety** — *dormant, see below* |
 
 **Alert 1 takes precedence over 2 and 3.** If it fires at the same time as
 either of the others, triage it first, in a separate incident, even if the
@@ -204,3 +207,142 @@ undetected is a full outage window, not a degraded one.
    latency is a different, milder problem (closer to alert 2) than a flat
    503 from a dead credential, and the two need different follow-up even
    though both trip this same threshold.
+
+---
+
+## 4. `/respond` verified rate < 95% over 15 minutes
+
+**Class: patient safety. Page immediately, do not wait for business hours.**
+
+**Signal.** The `verified` boolean score Langfuse records on every `/respond`
+trace (`main.py`'s respond handler, `trace.score_trace(name="verified", ...)`).
+Rate = traces scored 1 / all traces carrying that score, over a trailing
+15-minute window. Off-scope refusals are excluded: they never open a root trace,
+because the supervisor short-circuits before the graph runs.
+
+**What it detects.** Alert 1's counterpart for the Week 2 document path. On
+`/respond`, `verified` is DERIVED, never set: `GroundedAnswer.model_post_init`
+computes it as `scope == "in_scope" AND len(citations) > 0 AND no fabricated
+citation markers`. So a sustained drop means one of three things, all bad:
+retrieval is returning nothing (evidence_retriever handing back an empty list),
+the answer model is citing `[n]` markers pointing at chunks that were never
+retrieved, or the graph is routing in-scope questions somewhere they should not
+go.
+
+**Why this threshold.** Unlike alert 1, this is not model-variance noise — the
+invariant is structural, computed from counts, not judged by a heuristic. On a
+healthy system this should sit at 100%. 95% is set below the noise floor of a
+single unlucky sample in a low-traffic window, not as an acceptable failure rate.
+**If this alert fires at all, something is broken, not unlucky.**
+
+**Remediation.**
+1. Pull the failing traces from Langfuse (`verified=0`) and read the
+   `worker:*` child spans for the same `correlation_id`. The routing trace tells
+   you which worker to look at without guessing.
+2. If `worker:evidence_retriever` reports `chunks_retrieved: 0`: retrieval is
+   the cause. Check `/ready`'s `vector_index` key — a missing or unreadable
+   guideline corpus reports `not_ready`. Check for `rerank_failed` log lines: a
+   Cohere outage is non-fatal by design and should NOT cause this, so if it
+   correlates, `_rerank()`'s fallback is broken.
+3. If chunks are being retrieved but `verified` is still 0: suspect fabricated
+   citation markers. `hallucinated_markers()` in `agent/pipeline/answer.py`
+   blocks Verified when the answer cites `[4]` and only three chunks exist.
+   Check whether a recent deploy changed the answer prompt in `graph.py`.
+4. This alert does NOT mean take the service down. An unverified answer is
+   returned to the caller labelled Unverified with zero sources — the physician
+   sees the failure. The urgency is diagnosing it, not stopping traffic.
+5. Confirm the fix with `python -m pytest agent/gate` — the
+   `factually_consistent` and `citation_present` categories are the automated
+   form of this check.
+
+---
+
+## 5. Eval category regression > 5%
+
+**Class: patient safety. CI alert, not a production page.**
+
+**Signal.** The pass rate per boolean rubric category from `python -m pytest
+agent/gate`, compared against the last green run on `main`. Five categories:
+`schema_valid`, `citation_present`, `factually_consistent`, `safe_refusal`,
+`no_phi_in_logs`.
+
+**What it detects.** A change that breaks a guarantee the system already made.
+The pre-push hook (`agent/gate/pre-push.sh`) already blocks any push where a
+gate test fails, so in practice this alert exists to catch the case where the
+hook was not installed — hooks live in `.git/hooks/` and do not travel with a
+clone.
+
+**Why this threshold.** The rubric specifies "more than 5% drop in any
+category." In practice this gate is stricter: it fails on **any** failing test,
+not a 5% regression, because at 54 cases a single failure is already a 1.9%
+drop and every case guards a specific documented failure mode. A 5% budget on 54
+cases would permit two silent regressions. **The 5% rule is the floor this alert
+must meet; the gate does not use it.**
+
+**Remediation.**
+1. Read which category failed. The test names say what broke — they are named
+   for the failure mode they guard, not for the function they call.
+2. Do NOT widen a schema or loosen an assertion to make it pass. That is
+   loosening a specification to release a failing batch. If the test is wrong,
+   fix the test deliberately and say why in the commit.
+3. If the hook was not installed, install it:
+   `cp agent/gate/pre-push.sh .git/hooks/pre-push && chmod +x .git/hooks/pre-push`
+4. Re-run `python -m pytest agent/gate -q`. 54 must pass before the change
+   moves.
+
+---
+
+## 6. Extraction failure rate > 5% over 15 minutes — DORMANT
+
+**Class: patient safety. Defined, not yet wired.**
+
+**Signal.** Would be: the rate of `ValidationError` / `JSONDecodeError` raised by
+`extract_intake_form()` and `extract_lab_report()` over a trailing 15-minute
+window.
+
+**Why it is dormant, stated plainly.** Extraction does not currently run in the
+request path. It is CLI-driven (`python -m agent.ingestion.extract`), and
+`/respond` reads a cached JSON fixture produced by an earlier run. **An alert on
+a code path that never executes in production is theater**, and this document's
+own preamble argues against alerts a responder cannot act on. This one is
+documented so the requirement is visibly tracked, not silently dropped.
+
+**What activates it.** The upload path (`W2_ARCHITECTURE.md` §7). Once a
+document can be uploaded and extracted in-request, this alert wires to the
+exception rate on that endpoint and moves to active.
+
+**The harder problem this alert would NOT catch, and why that matters more.**
+Extraction has been measured against degraded scans (`agent/ingestion/degrade.py`).
+At photocopier quality it is exact. At 90 DPI with 2.5° skew it **fails
+silently**: it dropped a `Borderline` platelet flag the lab had printed, invented
+an RDW value not on the document, and turned a `2X` template placeholder into
+`24` — fabricating a year. Every one of those passed the schema with **zero
+validation errors**, and the errors reproduced identically across runs, so
+resampling would report high confidence on a wrong chart.
+
+So an exception-rate alert would have caught none of it. **The schema proves
+shape, not truth.** The mitigation is the bounding-box overlay (§7): if the model
+must return coordinates for every value, it either points at the pixels where
+`13.6` lives, or it cannot — and being unable to produce a box *is* the
+confidence signal. That is a build item, not an alert.
+
+---
+
+## Not added: RAG retrieval latency
+
+The rubric names a RAG retrieval latency alert. **It is deliberately not here.**
+
+`W2_COST_LATENCY.md` measures the deployed service: p50 10.16s, p95 11.58s, and
+the Anthropic call is ~9.9s of it. BM25 over ~500 in-memory paragraph chunks is
+~0.01–0.05s, and the index builds once per process via `lru_cache`. **Retrieval
+is under 1% of request latency.**
+
+An alert on it would page a responder about noise that cannot move the number a
+physician experiences — precisely the failure this document's preamble names:
+"every alert added beyond ones a responder must act on immediately trains them to
+skim pages instead of reading them." Alert 2 already covers latency at the level
+that matters, and `/ready`'s `vector_index` key covers the failure a retrieval
+alert would actually catch (a missing corpus).
+
+If retrieval ever becomes a meaningful share of latency — a much larger corpus, a
+live reranker in the hot path — this decision should be revisited with data.
