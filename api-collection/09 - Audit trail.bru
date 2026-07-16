@@ -1,0 +1,18 @@
+meta {
+  name: 09 - Audit trail
+  type: http
+  seq: 9
+}
+get {
+  url: {{base_url}}/audit
+  auth: none
+}
+headers {
+  Authorization: Bearer {{token}}
+}
+docs {
+  Every request: user, correlation ID, action, patient ID, outcome, denial reason.
+
+  Run requests 04-07 first, then this. You should see respond/success,
+  respond/refused, and the 401 denial -- each with the real FHIR patient id.
+}

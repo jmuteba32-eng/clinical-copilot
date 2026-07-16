@@ -1,0 +1,16 @@
+meta {
+  name: 10 - BAA status
+  type: http
+  seq: 10
+}
+get {
+  url: {{base_url}}/baa-status
+  auth: none
+}
+docs {
+  Whether an administrator has attested that a BAA is in place.
+
+  This is a fail-closed DEPLOYMENT CONTROL that enforces a requirement. It is
+  not the agreement, and it is not proof of HIPAA compliance. Unset or false
+  blocks all PHI access, including /respond.
+}

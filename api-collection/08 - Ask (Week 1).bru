@@ -1,0 +1,24 @@
+meta {
+  name: 08 - Ask (Week 1)
+  type: http
+  seq: 8
+}
+post {
+  url: {{base_url}}/ask
+  body: json
+  auth: none
+}
+headers {
+  Authorization: Bearer {{token}}
+}
+body:json {
+  {
+    "patient_id": "{{patient_with_documents}}",
+    "question": "What are this patient's diagnoses?"
+  }
+}
+docs {
+  Week 1 baseline: single agent over structured OpenEMR data, with Week 1's
+  verification layer (hallucinated sources, uncited claims, boundary violations).
+  Unchanged in Week 2.
+}

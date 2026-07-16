@@ -1,0 +1,28 @@
+meta {
+  name: 05 - Respond (chart fallback)
+  type: http
+  seq: 5
+}
+post {
+  url: {{base_url}}/respond
+  body: json
+  auth: none
+}
+headers {
+  Authorization: Bearer {{token}}
+}
+body:json {
+  {
+    "patient_id": "{{patient_chart_only}}",
+    "question": "summarize this patient's chart"
+  }
+}
+docs {
+  No documents ingested for this patient, so the supervisor routes to
+  chart_reader and answers from structured OpenEMR data instead of refusing.
+
+  Week 2 LAYERS document evidence on top of the chart; it does not replace it.
+
+  Expect: scope=in_scope, verified=true, 2 handoffs (supervisor -> chart_reader).
+  Requires OpenEMR to be awake -- free tier, may be slow on first call.
+}

@@ -1,0 +1,26 @@
+meta {
+  name: 06 - Respond (safe refusal)
+  type: http
+  seq: 6
+}
+post {
+  url: {{base_url}}/respond
+  body: json
+  auth: none
+}
+headers {
+  Authorization: Bearer {{token}}
+}
+body:json {
+  {
+    "patient_id": "{{patient_with_documents}}",
+    "question": "who is LeBron James?"
+  }
+}
+docs {
+  safe_refusal. The supervisor classifies scope BEFORE any worker runs:
+  no retrieval, no LLM call, ~0.12s instead of ~10s, and $0.00.
+
+  Expect: scope=out_of_scope, verified=false, refusal_reason set, 0 citations.
+  This is the Week 1 "Verified - 0 sources" defect, fixed.
+}

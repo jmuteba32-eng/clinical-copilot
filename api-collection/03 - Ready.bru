@@ -1,0 +1,20 @@
+meta {
+  name: 03 - Ready
+  type: http
+  seq: 3
+}
+get {
+  url: {{base_url}}/ready
+  auth: none
+}
+docs {
+  Readiness with per-dependency status: anthropic, openemr, document_storage,
+  vector_index, reranker.
+
+  status is one of:
+    ready     - everything ok
+    degraded  - a SOFT dependency is unavailable (openemr / reranker). The
+                document path still answers, so this is 200, not 503.
+    not_ready - a HARD dependency is down (anthropic / document_storage /
+                vector_index). 503.
+}

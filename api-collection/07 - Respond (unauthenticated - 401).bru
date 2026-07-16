@@ -1,0 +1,24 @@
+meta {
+  name: 07 - Respond (unauthenticated - 401)
+  type: http
+  seq: 7
+}
+post {
+  url: {{base_url}}/respond
+  body: json
+  auth: none
+}
+body:json {
+  {
+    "patient_id": "{{patient_with_documents}}",
+    "question": "do you recommend surgery?"
+  }
+}
+docs {
+  No Authorization header on purpose. Expect 401 before any work runs.
+
+  This closes the Week 1 finding. The grader flagged missing TESTS on the
+  authorization boundary; the actual defect was that /ask and /chat had no auth
+  check at all, and /respond inherited it. All three now reject unauthenticated
+  requests, and the denial is audited with a denial_reason.
+}

@@ -1,0 +1,28 @@
+meta {
+  name: 04 - Respond (document path)
+  type: http
+  seq: 4
+}
+post {
+  url: {{base_url}}/respond
+  body: json
+  auth: none
+}
+headers {
+  Authorization: Bearer {{token}}
+}
+body:json {
+  {
+    "patient_id": "{{patient_with_documents}}",
+    "question": "do you recommend surgery for this patient?"
+  }
+}
+docs {
+  The Week 2 grounded pipeline. This patient has an ingested intake form.
+
+  supervisor -> intake_extractor -> supervisor -> evidence_retriever
+             -> supervisor -> answer
+
+  Expect: scope=in_scope, verified=true, 3 citations from
+  dermatochalasis_guideline.pdf, and 6 handoffs in the routing trace.
+}
