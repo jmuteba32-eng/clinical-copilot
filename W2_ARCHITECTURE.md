@@ -589,3 +589,183 @@ patient keeps answering.
 Because git is the backup. Committing is the backup event, it happens many times a day,
 and the pre-push hook means nothing reaches the remote without the eval gate passing
 first. **The recovery point is the last commit, and the last commit is always green.**
+
+## 13. Incident: OpenEMR outage (2026-07-16)
+
+**Status at submission: OpenEMR is down. The Week 2 document path is unaffected and
+serving.** `/ready` reports `degraded`, not `not_ready`, and names the dependency.
+
+This section is written while the incident is open, not after a clean recovery.
+
+### 13.1 What is affected
+
+| | |
+|---|---|
+| **Working** | `POST /respond` document path — supervisor → intake_extractor → evidence_retriever → answer, hybrid retrieval, Cohere rerank, cited answers, routing trace, safe refusals, auth, audit trail |
+| **Down** | OpenEMR itself; the `/respond` chart-fallback path; Week 1's `/ask` and `/chat`; the UI patient picker |
+
+The document path never touches OpenEMR, which is why it kept answering throughout.
+
+### 13.2 What happened
+
+The OpenEMR service was deployed from the stock `openemr/openemr:7.0.3` image with
+**no volume mounted**. It had been running untouched since initial setup.
+
+OpenEMR's container entrypoint (`docker/release/openemr.sh`) decides whether to run
+first-boot setup by reading a single marker:
+
+```bash
+is_configured() {
+    php -r "if (is_file('${SQLCONF_FILE}')) { require '${SQLCONF_FILE}';
+            echo isset(\$config) && \$config ? 1 : 0; } else { echo 0; }"
+}
+```
+
+`sites/default/sqlconf.php` is written **into the container filesystem** during setup.
+With no volume, that file — and every other artifact setup produces — existed only in
+the running container.
+
+Replacing the container to add a menu entry destroyed all of it. `auto_configure.php`
+then ran against an already-populated database and died:
+
+```
+ERROR IN OPENEMR INSTALL: Unable to execute SQL: CREATE TABLE ccda_field_mapping ...
+due to: Table 'ccda_field_mapping' already exists
+```
+
+**The trigger was a redeploy. The defect was that a redeploy could do this at all.**
+This container was one restart away from this failure from the day it was created —
+by anyone, for any reason, including a Railway-initiated restart.
+
+### 13.3 The attempted fix, and why it made things worse
+
+Reasoning from the entrypoint source: if `is_configured()` only reads `$config`, then
+supplying `sqlconf.php` with the real credentials and `$config = 1` should make the
+container skip setup and connect to the existing database.
+
+That was done via a custom start command that wrote the file before exec'ing
+`./openemr.sh`. The container started cleanly and logged success.
+
+**Then every page returned 500 and every OAuth call returned 404.**
+
+The reasoning was wrong in a way the source made visible and I did not read carefully
+enough. `MANUAL_SETUP` / `$config` do not gate *only* the database step. They gate the
+whole setup block (`openemr.sh` lines 745, 819, 869), which also generates:
+
+- OpenEMR's **encryption keys** (`sites/default/documents/logs_and_misc/methods/`)
+- the **OAuth2 signing certificates**
+- site scaffolding and file permissions
+
+All of those also lived only in the container filesystem. Telling the entrypoint
+"already configured" skipped the work that creates them — and then the entrypoint
+did this:
+
+```
+Setup scripts removed, we should be ready to go now!
+GET /interface/login/login.php   500
+POST /oauth2/default/token       404
+```
+
+**`cleanup_setup_scripts()` deletes `auto_configure.php` once `is_configured()` returns
+1** — a sensible security measure, since a live setup script is an attack surface. But
+because the marker was fabricated, the container removed the only tool that could have
+repaired it. It now believes it is configured, is not, and cannot fix itself.
+
+**The failed fix is more instructive than a clean recovery would have been.** The
+container was never "a database connection away" from working. It was carrying
+substantial generated state — keys, certificates, permissions — none of it durable, and
+none of it visible until it was gone.
+
+### 13.4 Root cause
+
+**Not the redeploy. Not the menu change.**
+
+> **Configuration and cryptographic state required to serve requests was stored in an
+> ephemeral container filesystem, with no volume and no reconstruction path.**
+
+The `openemr` service has no volume. `agent` and `mysql` both do. That asymmetry was
+visible in `railway status` for the entire project and was not read as a risk.
+
+**This is the same defect as §12.3.** The audit log writes to a container path because
+`appuser` cannot write to the mounted volume, so it does not survive a redeploy. Same
+class: **state that matters, living somewhere ephemeral.** One was found by writing a
+backup section; the other by triggering it.
+
+### 13.5 What was not lost
+
+**The database.** MySQL is a separate Railway service with its own volume. It was never
+touched. The failure mode proves it: `auto_configure.php` connected successfully and
+failed *because the tables already exist*.
+
+Patient records, conditions, medications are intact and unreachable — not gone.
+
+### 13.6 Recovery plan
+
+Not attempted before submission. It is ~90 minutes of deterministic work and was not
+worth doing tired against a deadline, given the Week 2 path is unaffected.
+
+1. **Point `MYSQL_DATABASE` at a fresh database name.** Auto-config runs clean and
+   generates its own keys and certificates.
+2. **Mount a volume at `/var/www/localhost/htdocs/openemr/sites`** — the actual fix.
+   Without it, the next redeploy repeats this.
+3. **Re-create the three synthetic patients** through the OpenEMR UI, matching
+   `agent/evals/patients.py`, which documents each patient's expected conditions and
+   medications verified against the live FHIR API. That file makes the re-seed
+   verifiable rather than approximate.
+4. **Update the UUID constants** — new patients get new FHIR ids:
+   - `FIXTURE_PATIENT_ID` (`agent/pipeline/respond.py`)
+   - `PATIENT_WITH_DATA` / `PATIENT_SPARSE` (`agent/evals/patients.py`)
+   - `api-collection/environments/*.bru`
+   - `agent/gate/test_patient_scoping.py`
+   - this document
+5. **Re-run** `python -m pytest agent/gate` and the live suite.
+
+The old database is retained, not dropped. Recovering its rows into the new schema is
+possible later; it is not on the critical path, because the data is synthetic.
+
+### 13.7 What this incident validates
+
+**The `degraded` state in `/ready` (§added same day) is the reason this is an incident
+and not an outage.**
+
+Before that change, `/ready` returned a binary verdict — 503 `not_ready` if OpenEMR
+authentication failed. During this incident it would have reported the entire service
+dead. It is not:
+
+```json
+{
+  "status": "degraded",
+  "checks": {
+    "anthropic": "ok",
+    "openemr": "unavailable",
+    "document_storage": "ok",
+    "vector_index": "ok",
+    "reranker": "ok"
+  }
+}
+```
+
+John Doe's document path returns `verified: true` with three cited dermatochalasis
+chunks, right now, with OpenEMR down. **A binary probe would have lied about a service
+that is answering correctly.**
+
+The hard/soft dependency split was written hours before this incident on the argument
+that the document path does not need OpenEMR. That argument was tested the same day and
+held.
+
+### 13.8 What I would do differently
+
+1. **Read `railway status` as a risk inventory.** "`openemr` has no volume" was on screen
+   for the whole project. A service with no volume is a service that cannot survive a
+   restart — that should have been a §12 finding before it was a §13 incident.
+2. **Never redeploy a container that has never been redeployed** without first asking what
+   state it accumulated since creation. Uptime is not evidence of durability; it can be
+   evidence that nobody has tested durability.
+3. **Read the whole gate, not the condition I was looking for.** `is_configured()` gates
+   far more than the database step. I found the line that supported the fix I wanted and
+   stopped reading. The rest of the block was three screens away and would have shown that
+   `$config = 1` skips key generation and triggers deletion of the repair tool.
+4. **Sequence risky infrastructure work behind everything else, and stop at the first
+   surprise.** The six documented rubric gaps were closed first, which is why they survive
+   this. The embedding attempt should have stopped at the first failed deploy rather than
+   the fourth.
