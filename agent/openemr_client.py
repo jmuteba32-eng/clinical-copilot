@@ -256,9 +256,13 @@ class OpenEMRClient:
     # long-lived agent process renew its session without re-sending the
     # resource owner's password on every expiry.
     SCOPE: Final[str] = (
-        "openid fhirUser offline_access api:fhir "
-        "user/Patient.read user/Condition.read user/Encounter.read "
-        "user/MedicationRequest.read user/Observation.read user/DiagnosticReport.read"
+        "openid fhirUser offline_access api:oemr api:fhir "
+        "user/Patient.read patient/Patient.read "
+        "user/Condition.read patient/Condition.read "
+        "user/Encounter.read patient/Encounter.read "
+        "user/MedicationRequest.read patient/MedicationRequest.read "
+        "user/Observation.read patient/Observation.read "
+        "user/DiagnosticReport.read patient/DiagnosticReport.read"
     )
 
     def __init__(

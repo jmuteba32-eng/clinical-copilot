@@ -746,6 +746,19 @@
       const OPENING_MESSAGE = "Summarize this patient's chart for me.";
 
       const $ = (id) => document.getElementById(id);
+      // Week 2 embed: OpenEMR opens this UI with ?patient_id=<uuid> to launch
+      // the Co-Pilot already scoped to the patient open in the chart. Read once
+      // at load; validated as a UUID before use so a malformed query string
+      // can't drive patient selection.
+      const EMBED_UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+      function embeddedPatientId() {
+        try {
+          const raw = new URLSearchParams(window.location.search).get("patient_id");
+          return raw && EMBED_UUID_RE.test(raw.trim()) ? raw.trim() : null;
+        } catch (e) {
+          return null;
+        }
+      }
 
       const views = {
         login: $("view-login"),
@@ -1172,11 +1185,25 @@
           // degradation, not a feature: when OpenEMR returns, /patients repopulates and this
           // path is never taken.
           patients = [
-            { id: "a2388bb2-562c-413c-9505-7a3c6104d944", name: "John Doe", dob: "2002-03-09", sex: "Male" },
+            { id: "a24a1d32-9241-4a74-bc9a-f4cf7e3a97a6", name: "John Doe", dob: "2002-03-09", sex: "Male" },
           ];
         }
         state.patients = patients;
         renderPatientList($("patient-search").value);
+
+        // Week 2 embed: if launched from OpenEMR with a patient_id, jump
+        // straight into that patient's chat, skipping the picker. If the id
+        // isn't in the loaded list (e.g. OpenEMR-down fallback), synthesize a
+        // minimal record so the document pipeline is still reachable for the
+        // one patient we hold ingested documents for.
+        const embedId = embeddedPatientId();
+        if (embedId) {
+          let target = state.patients.find((p) => p.id === embedId);
+          if (!target) {
+            target = { id: embedId, name: "Patient " + embedId.slice(0, 8), age: null, sex: null };
+          }
+          selectPatient(target);
+        }
       }
 
       function renderPatientList(filter) {

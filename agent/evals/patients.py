@@ -24,7 +24,7 @@ from __future__ import annotations
 # patient has a real medication, and its Condition is coded as an eyelid
 # disorder, not dry eye. See PATIENT_SPARSE below for the patient that
 # actually carries the dry-eye-coded condition.
-PATIENT_WITH_DATA = "a2388bb2-562c-413c-9505-7a3c6104d944"
+PATIENT_WITH_DATA = "a24a1d32-9241-4a74-bc9a-f4cf7e3a97a6"
 
 # Verified live data: ZERO medications, ZERO labs/imaging, and two duplicate
 # Condition entries coded H04.123 ("dry eye syndrome of bilateral lacrimal

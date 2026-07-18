@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Request, Response
+from fastapi import Depends, FastAPI, File, Form, Request, Response, UploadFile
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field
@@ -751,7 +751,7 @@ async def _check_dependencies(request: Request, openemr_client: OpenEMRClient) -
 
     # --- Document storage: HARD. Where ingested documents live. ---
     try:
-        from agent.pipeline.respond import _INTAKE_FIXTURE
+        from agent.pipeline.respond import _INTAKE_FIXTURE, _INTAKE_LIVE
 
         if _INTAKE_FIXTURE.is_file() and _INTAKE_FIXTURE.stat().st_size > 0:
             checks["document_storage"] = "ok"
@@ -869,6 +869,104 @@ async def ready(request: Request, openemr_client: OpenEMRClient = Depends(get_op
     return JSONResponse(
         status_code=code,
         content={"status": status, "checks": checks, "notes": notes, "correlation_id": correlation_id},
+    )
+
+
+@app.post("/ingest")
+async def ingest_document(
+    request: Request,
+    file: UploadFile = File(...),
+    doc_type: str = Form(...),
+) -> JSONResponse:
+    """Live document ingestion: upload a PDF, run real VLM extraction, persist it.
+
+    This is the ingestion-to-answer entry point. It runs the same extractor the
+    CLI uses (agent.ingestion.extract) on the uploaded PDF, validates the result
+    through the strict Pydantic schema, and writes the validated JSON to the path
+    the Week 2 pipeline reads -- so the very next /respond for this patient
+    answers from the freshly-extracted document, not a pre-baked fixture.
+    """
+    import tempfile
+    from agent.ingestion.extract import extract_intake_form, extract_lab_report
+    from agent.pipeline.respond import _INTAKE_FIXTURE
+
+    correlation_id = _correlation_id_for(request)
+
+    denied = _unauthorized(request, correlation_id, "ingest")
+    if denied is not None:
+        return denied
+
+    if doc_type not in ("intake_form", "lab_pdf"):
+        return JSONResponse(
+            status_code=422,
+            content={"error": "doc_type must be 'intake_form' or 'lab_pdf'.", "correlation_id": correlation_id},
+        )
+
+    raw = await file.read()
+    if not raw:
+        return JSONResponse(
+            status_code=422,
+            content={"error": "Uploaded file is empty.", "correlation_id": correlation_id},
+        )
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+
+    logger.info(
+        "ingest_started",
+        extra={"event": "ingest_started", "correlation_id": correlation_id, "doc_type": doc_type, "upload_filename": file.filename},
+    )
+
+    try:
+        extraction = await asyncio.to_thread(
+            extract_intake_form if doc_type == "intake_form" else extract_lab_report,
+            tmp_path,
+            file.filename,
+        )
+    except Exception as exc:
+        logger.warning(
+            "ingest_extraction_failed",
+            extra={"event": "ingest_extraction_failed", "correlation_id": correlation_id, "reason": type(exc).__name__},
+        )
+        return JSONResponse(
+            status_code=422,
+            content={"error": f"Extraction failed: {type(exc).__name__}", "correlation_id": correlation_id},
+        )
+
+    # Persist to the path the pipeline reads. The intake form drives the existing
+    # John Doe flow directly; the lab report is written alongside for inspection
+    # (surfacing it in the answer is the next graph step, out of scope tonight).
+  
+  
+  
+  
+    field_count = len(extraction.model_dump())
+    # Write to the Railway volume (/data), which is writable and persistent.
+    # The app directory (/app/agent/...) is read-only for appuser, and a copy
+    # there would not survive a redeploy anyway.
+    _INTAKE_LIVE.parent.mkdir(parents=True, exist_ok=True)
+    if doc_type == "intake_form":
+        _INTAKE_LIVE.write_text(extraction.model_dump_json(indent=2), encoding="utf-8")
+    else:
+        _INTAKE_LIVE.parent.joinpath("last_lab_report.json").write_text(
+            extraction.model_dump_json(indent=2), encoding="utf-8"
+        )
+
+    logger.info(
+        "ingest_completed",
+        extra={"event": "ingest_completed", "correlation_id": correlation_id, "doc_type": doc_type, "fields_extracted": field_count},
+    )
+
+    return JSONResponse(
+        status_code=200,
+        content={
+            "status": "ingested",
+            "doc_type": doc_type,
+            "fields_extracted": field_count,
+            "extraction": extraction.model_dump(mode="json"),
+            "correlation_id": correlation_id,
+        },
     )
 
 

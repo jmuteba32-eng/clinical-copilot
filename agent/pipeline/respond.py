@@ -27,6 +27,11 @@ load_dotenv(Path(__file__).resolve().parent.parent / ".env")
 
 _INTAKE_FIXTURE = Path(__file__).resolve().parent / "john_doe_intake.json"
 
+# Writable, persistent copy on the Railway volume. Ingestion writes here (the
+# app directory is read-only for appuser); the loader prefers it when present,
+# so a freshly-ingested document survives redeploys and drives the pipeline.
+_INTAKE_LIVE = Path("/data/john_doe_intake.json")
+
 # The OpenEMR Patient this ingested intake form belongs to. Verified against the
 # live FHIR API: this patient carries Oxymetazoline (Upneeq) and an eyelid
 # disorder coded H02.839 -- the same facts the intake form states, so the
@@ -36,13 +41,14 @@ _INTAKE_FIXTURE = Path(__file__).resolve().parent / "john_doe_intake.json"
 # point: without it, selecting a different patient in the UI would still return
 # THIS patient's document-derived answer, which is a cross-patient leak of
 # exactly the kind Week 1's session scoping exists to prevent.
-FIXTURE_PATIENT_ID = "a2388bb2-562c-413c-9505-7a3c6104d944"
+FIXTURE_PATIENT_ID = "a24a1d32-9241-4a74-bc9a-f4cf7e3a97a6"
 
 _MODEL = "claude-sonnet-4-6"
 
 
 def _load_intake() -> dict:
-    return json.loads(_INTAKE_FIXTURE.read_text(encoding="utf-8-sig"))
+    src = _INTAKE_LIVE if _INTAKE_LIVE.is_file() else _INTAKE_FIXTURE
+    return json.loads(src.read_text(encoding="utf-8-sig"))
 
 
 def _intake_summary(intake: dict) -> str:
