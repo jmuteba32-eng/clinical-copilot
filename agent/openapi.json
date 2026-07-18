@@ -126,6 +126,25 @@
         "title": "AuditRecord",
         "type": "object"
       },
+      "Body_ingest_document_ingest_post": {
+        "properties": {
+          "doc_type": {
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file",
+          "doc_type"
+        ],
+        "title": "Body_ingest_document_ingest_post",
+        "type": "object"
+      },
       "ChatRequest": {
         "properties": {
           "conversation_history": {
@@ -710,6 +729,43 @@
           }
         },
         "summary": "Health"
+      }
+    },
+    "/ingest": {
+      "post": {
+        "description": "Live document ingestion: upload a PDF, run real VLM extraction, persist it.\n\nThis is the ingestion-to-answer entry point. It runs the same extractor the\nCLI uses (agent.ingestion.extract) on the uploaded PDF, validates the result\nthrough the strict Pydantic schema, and writes the validated JSON to the path\nthe Week 2 pipeline reads -- so the very next /respond for this patient\nanswers from the freshly-extracted document, not a pre-baked fixture.",
+        "operationId": "ingest_document_ingest_post",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_ingest_document_ingest_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Document"
       }
     },
     "/login": {
