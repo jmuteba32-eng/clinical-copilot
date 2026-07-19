@@ -30,7 +30,11 @@ _INTAKE_FIXTURE = Path(__file__).resolve().parent / "john_doe_intake.json"
 # Writable, persistent copy on the Railway volume. Ingestion writes here (the
 # app directory is read-only for appuser); the loader prefers it when present,
 # so a freshly-ingested document survives redeploys and drives the pipeline.
-_INTAKE_LIVE = Path("/data/john_doe_intake.json")
+# Writable location owned by appuser. (/data is a mounted volume but not writable
+# by appuser without a Dockerfile chown; home dir is always writable. Tradeoff:
+# ingested file does not survive a redeploy -- acceptable for the demo, where
+# upload and query happen in one session. Documented as a known limitation.)
+_INTAKE_LIVE = Path.home() / ".clinical-copilot" / "john_doe_intake.json"
 
 # The OpenEMR Patient this ingested intake form belongs to. Verified against the
 # live FHIR API: this patient carries Oxymetazoline (Upneeq) and an eyelid

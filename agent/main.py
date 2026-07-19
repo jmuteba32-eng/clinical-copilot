@@ -888,7 +888,7 @@ async def ingest_document(
     """
     import tempfile
     from agent.ingestion.extract import extract_intake_form, extract_lab_report
-    from agent.pipeline.respond import _INTAKE_FIXTURE
+    from agent.pipeline.respond import _INTAKE_FIXTURE, _INTAKE_LIVE
 
     correlation_id = _correlation_id_for(request)
 
@@ -922,7 +922,6 @@ async def ingest_document(
         extraction = await asyncio.to_thread(
             extract_intake_form if doc_type == "intake_form" else extract_lab_report,
             tmp_path,
-            file.filename,
         )
     except Exception as exc:
         logger.warning(
