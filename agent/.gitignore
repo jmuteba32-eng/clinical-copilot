@@ -1,3 +1,8 @@
 
 backup.py
 openemr_backup.sql
+
+restore.py
+wipe.py
+backup.py
+openemr_backup.sql
