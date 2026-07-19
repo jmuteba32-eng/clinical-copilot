@@ -143,15 +143,20 @@ def answer(state: CoPilotState) -> dict:
         from anthropic import Anthropic
 
         evidence = state.get("evidence", [])
+        from agent.pipeline.respond import _load_lab, _lab_summary
+        lab_data = _load_lab()
+        lab_block = _lab_summary(lab_data) if lab_data else "No lab report has been ingested for this patient."
         evidence_block = "\n\n".join(
             f"[{i+1}] {e['file']} p{e['page']}: {e['text']}" for i, e in enumerate(evidence)
         )
         prompt = (
             "You are a clinical co-pilot preparing a physician for a follow-up visit. "
-            "Answer the question using ONLY the patient intake summary and the guideline "
-            "evidence below. Do not invent facts. If the evidence does not support an "
-            "answer, say so plainly. Cite guideline claims by their [n] marker.\n\n"
+            "Answer the question using ONLY the patient intake summary, the lab report, "
+            "and the guideline evidence below. Do not invent facts. If the information "
+            "does not support an answer, say so plainly. Cite guideline claims by their "
+            "[n] marker.\n\n"
             f"PATIENT INTAKE SUMMARY:\n{state.get('intake_summary', '')}\n\n"
+            f"LAB REPORT:\n{lab_block}\n\n"
             f"GUIDELINE EVIDENCE:\n{evidence_block}\n\n"
             f"PHYSICIAN QUESTION: {state['question']}"
         )

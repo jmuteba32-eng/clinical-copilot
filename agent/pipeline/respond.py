@@ -54,18 +54,56 @@ def _load_intake() -> dict:
     src = _INTAKE_LIVE if _INTAKE_LIVE.is_file() else _INTAKE_FIXTURE
     return json.loads(src.read_text(encoding="utf-8-sig"))
 
-
 def _intake_summary(intake: dict) -> str:
     """Compact, PHI-minimal summary the LLM can ground on."""
     meds = ", ".join(f"{m['name']} ({m.get('dose') or 'dose n/a'})" for m in intake.get("medications", [])) or "none recorded"
     allergies = ", ".join(a["allergen"] for a in intake.get("allergies", [])) or "none recorded"
+    fam = ", ".join(
+        f"{f.get('relative')}: {f.get('condition') or 'no condition noted'}"
+        for f in intake.get("family_history", [])
+    ) or "none recorded"
+    demo_bits = []
+    if intake.get("race_ethnicity"): demo_bits.append(f"race/ethnicity {intake.get('race_ethnicity')}")
+    if intake.get("height"): demo_bits.append(f"height {intake.get('height')}")
+    if intake.get("weight"): demo_bits.append(f"weight {intake.get('weight')}")
+    demo = ("; " + ", ".join(demo_bits)) if demo_bits else ""
     return (
         f"Patient: {intake.get('patient_name')}, DOB {intake.get('date_of_birth')}, "
-        f"{intake.get('sex')}. Chief concern: {intake.get('chief_concern')} "
+        f"{intake.get('sex')}{demo}. Chief concern: {intake.get('chief_concern')} "
         f"(onset {intake.get('concern_onset')}). Symptoms: {intake.get('concern_symptoms')}. "
-        f"Current medications: {meds}. Allergies: {allergies}."
+        f"Current medications: {meds}. Allergies: {allergies}. Family history: {fam}."
     )
 
+
+# --- Lab report (second document type) ---------------------------------------
+# The /ingest endpoint writes the uploaded lab report next to the intake file.
+_LAB_LIVE = _INTAKE_LIVE.parent / "last_lab_report.json"
+
+
+def _load_lab() -> dict | None:
+    """Load the most recently ingested lab report, or None if none ingested."""
+    if not _LAB_LIVE.is_file():
+        return None
+    try:
+        return json.loads(_LAB_LIVE.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+
+
+def _lab_summary(lab: dict) -> str:
+    """Compact, PHI-minimal lab summary the LLM can ground on."""
+    rows = lab.get("results", []) or []
+    if not rows:
+        return "A lab report was ingested but contained no readable result rows."
+    lines = []
+    for r in rows:
+        flag = f" [{r.get('abnormal_flag')}]" if r.get("abnormal_flag") else ""
+        unit = f" {r.get('unit')}" if r.get("unit") else ""
+        ref = f" (ref {r.get('reference_range')})" if r.get("reference_range") else ""
+        lines.append(f"{r.get('test_name')}: {r.get('value')}{unit}{ref}{flag}")
+    collected = lab.get("collection_date") or "date not stated"
+    header = f"Lab report ({lab.get('lab_name') or 'lab'}), collected {collected}:"
+    return header + " " + "; ".join(lines)
 
 def has_documents_for(patient_id: str) -> bool:
     """Whether any document has been ingested for this patient.
