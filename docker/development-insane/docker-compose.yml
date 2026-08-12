@@ -717,7 +717,7 @@ services:
     - dev-php-fpm-8-6-redis
   dev-php-fpm-8-1:
     restart: always
-    image: openemr/dev-php-fpm:8.1@sha256:d53a1b0f71016248b022ee2f8f2daab4d53d7588bacf66c39e1786eaf5eb1a2a
+    image: openemr/dev-php-fpm:8.1@sha256:39250bba4d41ec04fa346a290f72bbb53af333789ee20545384e3b70c1cc4a21
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-1/php.ini:/usr/local/etc/php/php.ini:ro
@@ -725,7 +725,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-2:
     restart: always
-    image: openemr/dev-php-fpm:8.2@sha256:0513282d628e6b0240974fe51c9c6bd4b576db67dc6d5c9a522c6e7808e8147a
+    image: openemr/dev-php-fpm:8.2@sha256:861926a8c1ffcc09f8b1a61d78017d5f5bf1acfbbde466e587b64eefc4a20df8
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-2/php.ini:/usr/local/etc/php/php.ini:ro
@@ -733,7 +733,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-3:
     restart: always
-    image: openemr/dev-php-fpm:8.3@sha256:2ed0433423a95e4da4c364c05d03ce08d1d39b81e89a3493e09abe481269d334
+    image: openemr/dev-php-fpm:8.3@sha256:0ec188584e2ca9c7dcc0c88dda18da192a04edb3a801980f8620bc971266696d
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-3/php.ini:/usr/local/etc/php/php.ini:ro
@@ -741,7 +741,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-4:
     restart: always
-    image: openemr/dev-php-fpm:8.4@sha256:23bcc9d16a13f887178db6a92927987422c848bcf2b5ec4a12e91e01e4ba3cc1
+    image: openemr/dev-php-fpm:8.4@sha256:5b997f70cf4dc912e6d88fb9497318e010e079fcd267a223a7eb025c78ea747a
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-4/php.ini:/usr/local/etc/php/php.ini:ro
@@ -749,7 +749,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-5:
     restart: always
-    image: openemr/dev-php-fpm:8.5@sha256:bc73931cc0d383a984a8aa5759145f41e651057ca53b2c9f5f1eb280a84bc45e
+    image: openemr/dev-php-fpm:8.5@sha256:a70c4e3fdd27f0edb365ccc3afd67fe78fa53fea49af20c19bd658f445e3ee62
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-5/php.ini:/usr/local/etc/php/php.ini:ro
@@ -765,7 +765,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-1-redis:
     restart: always
-    image: openemr/dev-php-fpm:8.1-redis@sha256:52ad2e8930837c1870ea3b286a3e6e0848f51abd6ae9b68204f7326b0fd5aedd
+    image: openemr/dev-php-fpm:8.1-redis@sha256:d770300e641327944b35db16a4dbf08ed1459fc5e11443d91e5bd55c3516f750
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-1-redis/php.ini:/usr/local/etc/php/php.ini:ro
@@ -773,7 +773,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-2-redis:
     restart: always
-    image: openemr/dev-php-fpm:8.2-redis@sha256:5ef4c52d7e9611509af838e274ff0444027bd0265324c04729d94989f780cd05
+    image: openemr/dev-php-fpm:8.2-redis@sha256:e097c4d7dc0bb108cec8304b682735f1ec5ba80824e88e701fae23022bc8d230
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-2-redis/php.ini:/usr/local/etc/php/php.ini:ro
@@ -781,7 +781,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-3-redis:
     restart: always
-    image: openemr/dev-php-fpm:8.3-redis@sha256:61995a8ee85196d90dffdb52cfdd0dbfec579958952380eda50a90b92a737a56
+    image: openemr/dev-php-fpm:8.3-redis@sha256:7199c26f4e1729f55ce4e3dc4e833e2628f7332866eca41328d74761e6c2e4c7
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-3-redis/php.ini:/usr/local/etc/php/php.ini:ro
@@ -789,7 +789,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-4-redis:
     restart: always
-    image: openemr/dev-php-fpm:8.4-redis@sha256:4c1ffda0ccec403313369ba1724c1bd0a7e8e1222ded38e25a23eb10579fa77f
+    image: openemr/dev-php-fpm:8.4-redis@sha256:3746c808f533e777bd118d8fc410ead8c2b77c8bc7ed46dbcbf5e0664fdf0b97
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-4-redis/php.ini:/usr/local/etc/php/php.ini:ro
@@ -797,7 +797,7 @@ services:
       OPENEMR_DOCKER_ENV_TAG: insane-dev-docker
   dev-php-fpm-8-5-redis:
     restart: always
-    image: openemr/dev-php-fpm:8.5-redis@sha256:8d69228796e8a3fd8ac30aa064b4166e45008258e32b5894fd8dfb8578357ccd
+    image: openemr/dev-php-fpm:8.5-redis@sha256:8f8e3686307cf4618b83a602a755a6ed8a037186afd5df87706077babc857785
     volumes:
     - ../..:/usr/share/nginx/html/openemr
     - ../library/dockers/dev-php-fpm-8-5-redis/php.ini:/usr/local/etc/php/php.ini:ro
