@@ -30,7 +30,7 @@ from agent.tools import (  # noqa: E402
     get_diagnosis,
 )
 
-JOHN_DOE = "a24a1d32-9241-4a74-bc9a-f4cf7e3a97a6"
+JOHN_DOE = "a250a64d-95b9-4e2b-bdfd-9ab3fc887ad1"
 
 
 async def _find_patient_by_name(client: OpenEMRClient, name: str) -> list[dict[str, Any]]:

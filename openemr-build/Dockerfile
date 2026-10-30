@@ -1,14 +1,17 @@
-# OpenEMR, plus this fork's Co-Pilot menu tab.
-#
-# Deployed with `railway up --service openemr` from this directory, the same way
-# agent/ is deployed -- Railway cannot connect to this project's self-hosted
-# GitLab, so both services upload a build context rather than tracking a repo.
-#
-# This layers exactly ONE file onto the stock image. Deliberately not a rebuild
-# from source: the published image is known-good and does its own first-boot
-# database setup, and putting that at risk to change one JSON file is a bad
-# trade. Layering keeps every guarantee the image makes and overwrites one thing.
 FROM openemr/openemr:7.0.3
 
-COPY standard.json \
-     /var/www/localhost/htdocs/openemr/interface/main/tabs/menu/menus/standard.json
+# Pre-seeded DB config. Harmless now that the sites/ volume shadows this path,
+# but kept so a volume-less rebuild still has valid connection settings.
+COPY sqlconf.php /var/www/localhost/htdocs/openemr/sites/default/sqlconf.php
+RUN chown apache:apache /var/www/localhost/htdocs/openemr/sites/default/sqlconf.php \
+ && chmod 444 /var/www/localhost/htdocs/openemr/sites/default/sqlconf.php
+
+# Restore the stock menu at build time. A prior custom standard.json was a
+# truncated stub that killed main.php with JSON ERROR: 4.
+RUN curl -fsSL -o /var/www/localhost/htdocs/openemr/interface/main/tabs/menu/menus/standard.json \
+    "https://raw.githubusercontent.com/openemr/openemr/v7_0_3/interface/main/tabs/menu/menus/standard.json"
+
+# Clinical Co-Pilot launcher module. Must be baked into the image: the
+# custom_modules path is NOT under sites/, so the Railway volume won't persist it.
+COPY copilot-module /var/www/localhost/htdocs/openemr/interface/modules/custom_modules/oe-module-copilot
+RUN chown -R apache:apache /var/www/localhost/htdocs/openemr/interface/modules/custom_modules/oe-module-copilot

@@ -45,7 +45,7 @@ _INTAKE_LIVE = Path.home() / ".clinical-copilot" / "john_doe_intake.json"
 # point: without it, selecting a different patient in the UI would still return
 # THIS patient's document-derived answer, which is a cross-patient leak of
 # exactly the kind Week 1's session scoping exists to prevent.
-FIXTURE_PATIENT_ID = "a24a1d32-9241-4a74-bc9a-f4cf7e3a97a6"
+FIXTURE_PATIENT_ID = "a250a64d-95b9-4e2b-bdfd-9ab3fc887ad1"
 
 _MODEL = "claude-sonnet-4-6"
 

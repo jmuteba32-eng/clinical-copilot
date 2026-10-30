@@ -1,0 +1,23 @@
+# Week 2 eval gate -- PR-blocking CI.
+# Runs the SAME offline rubric suite the local pre-push hook runs
+# (agent/gate/), on every push and merge request. No live API keys needed:
+# agent/gate/ is network-free by design (the live suite is agent/evals/,
+# which is NOT run here). A failing rubric test fails the pipeline and
+# blocks the merge.
+stages:
+  - gate
+
+eval-gate:
+  stage: gate
+  image: python:3.11-slim
+  variables:
+    PIP_NO_CACHE_DIR: "1"
+  before_script:
+    - python -m pip install --upgrade pip
+    - pip install -r agent/requirements.txt
+  script:
+    - echo "Running Week 2 offline eval gate (agent/gate/)..."
+    - python -m pytest agent/gate -q -p no:cacheprovider
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'

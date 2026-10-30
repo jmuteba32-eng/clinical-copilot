@@ -1,59 +1,27 @@
-# logs
-/logs
-agent/audit_log.jsonl
-
-# environment vars
-.env
-
-# vendor and assets
-node_modules
-/vendor/*
-
-# oe-module-claimrev-connect is installed as a Composer dependency
-# (claimrevolution/oe-module-claimrev-connect) and relocated into this path by
-# the oe-module-installer-plugin during `composer install`. Never commit the
-# installed copy.
-/interface/modules/custom_modules/oe-module-claimrev-connect/*
-/public/assets/*
-/public/themes/*
-!/public/assets/modified
-/.docs/.out/*
-
-# ccda service build
-ccdaservice/node_modules
-
-# dev editor configs
-/.idea/*
-/.vscode/*
-/.vscode-oss/*
-/nbproject/*
-.DS_Store
-.buildpath
-.project
-.settings
-
-# testing
-.phpunit.result.cache
-
-# dev tool local overrides
-phpcs.xml
-phpstan.neon
-coverage/js-unit
-
-# phpstan
-tmp-phpstan/*
-
-# easy dev worktree support
-.worktrees.json
-.worktrees.json.lock
-docker/development-easy/docker-compose.override.yml
-docker/development-easy-light/docker-compose.override.yml
-docker/development-easy-redis/docker-compose.override.yml
-compose.override.yml
-tmp/
-.webpack-cache/
+# Secrets / tokens / probes -- never commit
 agent/.env
-agent/venv/
+agent/token.json
+agent/ask.json
+agent/checkurls.py
+agent/probe-doc.txt
+agent/probe-write.json
+agent/reg.json
+agent/reg-probe.json
+agent/reg-rest.json
+agent/reg-rw.json
+agent/wipe2.py
+agent/wipe3.py
+agent/wipeloop.py
+
+# Backups / scratch
+agent/requirements.backup.txt
+agent/requirements.cuda-backup.txt
+agent/requirements.locked.txt
+
+# Python
 __pycache__/
 *.pyc
-.pytest_cache/
+venv/
+agent/venv/
+
+agent/audit_log.jsonl

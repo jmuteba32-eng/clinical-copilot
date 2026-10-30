@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -614,6 +614,15 @@
       color: var(--slate-500);
       padding-bottom: 12px;
     }
+    /* Embed/narrow-width header fix: let the top bar wrap instead of overlapping
+       when the co-pilot runs inside the OpenEMR slide-out panel (~560px). */
+    @media (max-width: 700px) {
+      .topbar { flex-wrap: wrap; justify-content: flex-start; padding: 10px 14px; gap: 10px; }
+      .topbar-left { flex-wrap: wrap; gap: 10px; }
+      .topbar-title { white-space: normal; }
+      .topbar-actions { display: flex; flex-wrap: wrap; gap: 6px; width: 100%; }
+      .topbar-actions .btn-ghost { padding: 5px 8px; font-size: 0.8rem; }
+    }
   </style>
 </head>
 <body>
@@ -646,9 +655,9 @@
   <section id="view-picker" class="gate hidden">
     <div class="card picker-card">
       <h2>Select a patient</h2>
-      <p class="subtitle">Signed in as <strong id="picker-username"></strong>. Choose one chart — the session stays locked to that patient. <span class="pill pill-baa" id="picker-baa">BAA: …</span></p>
+      <p class="subtitle">Signed in as <strong id="picker-username"></strong>. Choose one chart â€” the session stays locked to that patient. <span class="pill pill-baa" id="picker-baa">BAA: â€¦</span></p>
       <label for="patient-search">Search</label>
-      <input type="search" id="patient-search" placeholder="Search by patient name…" autocomplete="off" />
+      <input type="search" id="patient-search" placeholder="Search by patient nameâ€¦" autocomplete="off" />
       <ul class="patient-list" id="patient-list"></ul>
       <p id="picker-error" class="error-text hidden"></p>
       <div style="margin-top: 20px; text-align: center; display: flex; gap: 8px; justify-content: center; flex-wrap: wrap;">
@@ -669,7 +678,7 @@
         <div class="scope-pills">
           <span class="pill"><strong>Physician</strong> <span id="hdr-physician"></span></span>
           <span class="pill pill-active"><strong>Patient</strong> <span id="hdr-patient"></span></span>
-          <span class="pill pill-baa" id="chat-baa">BAA: …</span>
+          <span class="pill pill-baa" id="chat-baa">BAA: â€¦</span>
         </div>
       </div>
       <div class="topbar-actions">
@@ -685,7 +694,7 @@
     <div class="chat-main">
       <div class="messages" id="messages" role="log" aria-live="polite"></div>
       <form class="composer" id="chat-form">
-        <textarea id="message-input" rows="1" placeholder="Ask a follow-up about this patient…" disabled></textarea>
+        <textarea id="message-input" rows="1" placeholder="Ask a follow-up about this patientâ€¦" disabled></textarea>
         <button type="submit" class="btn btn-send" id="send-btn" disabled>Send</button>
       </form>
       <p class="footer-note">Every answer is verified against retrieved chart sources. Session scoped to one patient.</p>
@@ -701,7 +710,7 @@
         </div>
         <span class="topbar-title">Access Audit Log</span>
         <span class="pill"><strong>User</strong> <span id="audit-username"></span></span>
-        <span class="pill pill-baa" id="audit-baa">BAA: …</span>
+        <span class="pill pill-baa" id="audit-baa">BAA: â€¦</span>
       </div>
       <div class="topbar-actions">
         <button type="button" class="btn btn-ghost" id="audit-back-picker">Patients</button>
@@ -733,7 +742,7 @@
     (function () {
       "use strict";
 
-      // All state in memory only — no localStorage / sessionStorage.
+      // All state in memory only â€” no localStorage / sessionStorage.
       const state = {
         token: null,
         username: null,
@@ -856,7 +865,7 @@
       function patientSecondary(p) {
         const age = p.age != null ? p.age + "y" : "age ?";
         const sex = p.sex ? p.sex.charAt(0).toUpperCase() + p.sex.slice(1) : "sex ?";
-        return age + " · " + sex;
+        return age + " Â· " + sex;
       }
 
       function scrollMessages() {
@@ -874,7 +883,7 @@
             const row = document.createElement("div");
             row.id = "loading-indicator";
             row.className = "loading-row";
-            row.innerHTML = '<div class="spinner" aria-hidden="true"></div><span>Retrieving chart data…</span>';
+            row.innerHTML = '<div class="spinner" aria-hidden="true"></div><span>Retrieving chart dataâ€¦</span>';
             $("messages").appendChild(row);
             scrollMessages();
           }
@@ -975,7 +984,7 @@
           '<span class="msg-label">Co-Pilot</span>' +
           '<div class="bubble agent">' + formatAnswerHtml(text) + "</div>" +
           '<span class="verify-badge ' + badgeClass + '">' +
-          '<span class="verify-dot"></span>' + badgeLabel + " · " + sources + " source" + (sources === 1 ? "" : "s") +
+          '<span class="verify-dot"></span>' + badgeLabel + " Â· " + sources + " source" + (sources === 1 ? "" : "s") +
           "</span>";
         $("messages").appendChild(row);
         scrollMessages();
@@ -1062,7 +1071,7 @@
       }
 
       function formatTimestampUtc(iso) {
-        if (!iso) return "—";
+        if (!iso) return "â€”";
         const d = new Date(iso);
         if (Number.isNaN(d.getTime())) return iso;
         return d.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC");
@@ -1075,7 +1084,7 @@
         errEl.classList.add("hidden");
         tbody.innerHTML = "";
         emptyEl.classList.add("hidden");
-        $("audit-username").textContent = state.username || "—";
+        $("audit-username").textContent = state.username || "â€”";
 
         const { ok, data } = await apiGet("/audit");
         if (!ok) {
@@ -1097,9 +1106,9 @@
           const eventClass = "event-pill " + (row.event_type || "").replace(/ /g, "_");
           tr.innerHTML =
             "<td class=\"mono\">" + escapeHtml(formatTimestampUtc(row.timestamp)) + "</td>" +
-            "<td>" + escapeHtml(row.username || "—") + "</td>" +
+            "<td>" + escapeHtml(row.username || "â€”") + "</td>" +
             "<td><span class=\"" + escapeHtml(eventClass) + "\">" + escapeHtml(formatEventType(row.event_type)) + "</span></td>" +
-            "<td class=\"mono\">" + escapeHtml(row.patient_id || "—") + "</td>" +
+            "<td class=\"mono\">" + escapeHtml(row.patient_id || "â€”") + "</td>" +
             "<td class=\"" + escapeHtml(outcomeClass(row.outcome)) + "\">" + escapeHtml(formatOutcome(row.outcome)) + "</td>";
           tbody.appendChild(tr);
         });
@@ -1188,7 +1197,7 @@
           // degradation, not a feature: when OpenEMR returns, /patients repopulates and this
           // path is never taken.
           patients = [
-            { id: "a24a1d32-9241-4a74-bc9a-f4cf7e3a97a6", name: "John Doe", dob: "2002-03-09", sex: "Male" },
+            { id: "a250a64d-95b9-4e2b-bdfd-9ab3fc887ad1", name: "John Doe", dob: "2002-03-09", sex: "Male" },
           ];
         }
         state.patients = patients;
@@ -1245,7 +1254,7 @@
         state.patientId = p.id;
         state.patientLabel = patientName(p);
         $("hdr-physician").textContent = state.username;
-        $("hdr-patient").textContent = patientName(p) + " · " + patientSecondary(p);
+        $("hdr-patient").textContent = patientName(p) + " Â· " + patientSecondary(p);
         $("message-input").disabled = false;
         $("send-btn").disabled = false;
         showView("chat");
@@ -1273,10 +1282,11 @@
             const file = input.files && input.files[0];
             if (!file) return;
             const status = document.getElementById("ingest-status");
-            if (status) status.textContent = "Extracting " + docType.replace("_", " ") + " from " + file.name + " …";
+            if (status) status.textContent = "Extracting " + docType.replace("_", " ") + " from " + file.name + " â€¦";
             try {
               const fd = new FormData();
               fd.append("doc_type", docType);
+              fd.append("patient_id", state.patientId || "");
               fd.append("file", file);
               const res = await fetch("/ingest", {
                 method: "POST",
@@ -1287,7 +1297,7 @@
               if (!res.ok) throw new Error(data.error || "Ingestion failed");
               if (status) status.textContent =
                 "Ingested " + String(data.doc_type).replace("_", " ") +
-                " — " + data.fields_extracted + " fields. Ask a question to see it used.";
+                " â€” " + data.fields_extracted + " fields. Ask a question to see it used.";
             } catch (e) {
               if (status) status.textContent = "Ingestion failed: " + e.message;
             }
@@ -1317,7 +1327,7 @@
 
           appendGroundedBubble(data);
         } catch {
-          appendErrorBubble("Network error — could not reach the agent. Please try again.");
+          appendErrorBubble("Network error â€” could not reach the agent. Please try again.");
         } finally {
           setLoading(false);
         }
@@ -1349,3 +1359,4 @@
   </script>
 </body>
 </html>
+

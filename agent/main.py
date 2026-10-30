@@ -294,7 +294,7 @@ def _record_audit(
     correlation_id: str | None = None,
     denial_reason: str | None = None,
 ) -> None:
-    """Append one audit event; never raises — failures are logged and dropped."""
+    """Append one audit event; never raises â€” failures are logged and dropped."""
     trail: AuditTrail | None = getattr(request.app.state, "audit_trail", None)
     if trail is None:
         return
@@ -350,7 +350,7 @@ def _unauthorized(request: Request, correlation_id: str, endpoint: str) -> JSONR
 
 
 def _is_baa_confirmed() -> bool:
-    """Safe read of admin BAA attestation — defaults to blocked on any failure."""
+    """Safe read of admin BAA attestation â€” defaults to blocked on any failure."""
     try:
         return baa_confirmed()
     except Exception:
@@ -545,7 +545,7 @@ class ChatTurn(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    patient_id: str = Field(..., min_length=1, description="The FHIR Patient resource ID — fixed for the whole session.")
+    patient_id: str = Field(..., min_length=1, description="The FHIR Patient resource ID â€” fixed for the whole session.")
     message: str = Field(..., min_length=1, description="The physician's current message in this session.")
     conversation_history: list[ChatTurn] = Field(
         default_factory=list,
@@ -571,7 +571,7 @@ class LoginResponse(BaseModel):
 
 
 class PatientSummary(BaseModel):
-    """Picker row for GET /patients — chart identification, not agent clinical output.
+    """Picker row for GET /patients â€” chart identification, not agent clinical output.
 
     ``name`` is included so physicians can select the right chart. The agent's
     ``get_intake`` tool deliberately omits name (minimum-necessary PHI for Q&A).
@@ -598,13 +598,13 @@ _PATIENT_NOT_FOUND_MESSAGE = "No patient with that identifier exists."
 
 @app.get("/", response_class=HTMLResponse)
 async def index() -> HTMLResponse:
-    """Clinical chat UI — self-contained HTML, no build step."""
+    """Clinical chat UI â€” self-contained HTML, no build step."""
     return HTMLResponse(content=_UI_HTML)
 
 
 @app.post("/login", response_model=LoginResponse)
 async def login(request: Request, payload: LoginRequest) -> LoginResponse | JSONResponse:
-    """MVP physician login — accepts configured credentials, returns an in-memory session token."""
+    """MVP physician login â€” accepts configured credentials, returns an in-memory session token."""
     correlation_id = _correlation_id_for(request)
     expected_user = os.environ.get("AGENT_UI_USERNAME", "admin")
     expected_pass = os.environ.get("AGENT_UI_PASSWORD", "ClinicalCoPilot2026!")
@@ -877,6 +877,7 @@ async def ingest_document(
     request: Request,
     file: UploadFile = File(...),
     doc_type: str = Form(...),
+    patient_id: str = Form(""),
 ) -> JSONResponse:
     """Live document ingestion: upload a PDF, run real VLM extraction, persist it.
 
@@ -889,6 +890,7 @@ async def ingest_document(
     import tempfile
     from agent.ingestion.extract import extract_intake_form, extract_lab_report
     from agent.pipeline.respond import _INTAKE_FIXTURE, _INTAKE_LIVE
+    from agent.openemr_writer import OpenEMRWriter, OpenEMRWriteError
 
     correlation_id = _correlation_id_for(request)
 
@@ -952,10 +954,39 @@ async def ingest_document(
             extraction.model_dump_json(indent=2), encoding="utf-8"
         )
 
-    logger.info(
+        logger.info(
         "ingest_completed",
         extra={"event": "ingest_completed", "correlation_id": correlation_id, "doc_type": doc_type, "fields_extracted": field_count},
     )
+
+    # Week 2 Step 2: persist the source document + derived facts back to OpenEMR.
+    # Best-effort and non-fatal -- a slow/flaky EMR must not fail the ingest, but
+    # the outcome is always logged (never silently swallowed).
+    openemr_write_status = "skipped"
+    if patient_id and OpenEMRWriter.is_configured():
+        try:
+            writer = OpenEMRWriter()
+            stem = "intake_form" if doc_type == "intake_form" else "lab_report"
+            base_name = f"copilot_{stem}_{patient_id}"
+            await writer.write_document(
+                patient_uuid=patient_id,
+                filename=f"{base_name}.pdf",
+                content=raw,
+                correlation_id=correlation_id,
+            )
+            await writer.write_document(
+                patient_uuid=patient_id,
+                filename=f"{base_name}_facts.txt",
+                content=extraction.model_dump_json(indent=2).encode("utf-8"),
+                correlation_id=correlation_id,
+            )
+            openemr_write_status = "written"
+        except OpenEMRWriteError as exc:
+            openemr_write_status = "failed"
+            logger.warning(
+                "openemr_write_failed",
+                extra={"event": "openemr_write_failed", "correlation_id": correlation_id, "reason": str(exc)},
+            )
 
     return JSONResponse(
         status_code=200,
@@ -965,6 +996,7 @@ async def ingest_document(
             "fields_extracted": field_count,
             "extraction": extraction.model_dump(mode="json"),
             "correlation_id": correlation_id,
+            "openemr_write": openemr_write_status,
         },
     )
 
@@ -1404,7 +1436,7 @@ async def _patient_session_chart(
     Uses the encrypted cache when configured; otherwise fetches from OpenEMR
     on each call. Diagnoses are always re-fetched from OpenEMR on every
     session load (even on cache hit) so problem-list edits are not masked by
-    the chart cache TTL — see ``refresh_chart_diagnosis``.
+    the chart cache TTL â€” see ``refresh_chart_diagnosis``.
     """
     chart_cache: PatientChartCache | None = request.app.state.chart_cache
     if chart_cache is not None:
@@ -1674,3 +1706,4 @@ if __name__ == "__main__":
         log_config=None,
         access_log=False,
     )
+

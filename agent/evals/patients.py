@@ -24,14 +24,14 @@ from __future__ import annotations
 # patient has a real medication, and its Condition is coded as an eyelid
 # disorder, not dry eye. See PATIENT_SPARSE below for the patient that
 # actually carries the dry-eye-coded condition.
-PATIENT_WITH_DATA = "a24a1d32-9241-4a74-bc9a-f4cf7e3a97a6"
+PATIENT_WITH_DATA = "a250a64d-95b9-4e2b-bdfd-9ab3fc887ad1"   # John Doe: H02.839 + Upneeq (active)
 
 # Verified live data: ZERO medications, ZERO labs/imaging, and two duplicate
 # Condition entries coded H04.123 ("dry eye syndrome of bilateral lacrimal
 # glands") -- this is the patient with the real dry-eye diagnosis (see
 # test_regression.py), despite the original request associating that
 # diagnosis with PATIENT_WITH_DATA instead.
-PATIENT_SPARSE = "a238944b-11b5-40bb-9fd1-e5fd6c57e523"
+PATIENT_SPARSE = "a250a8c3-00f1-4050-a83d-466299f6abc1"      # Jane Smith: H04.123 dry eye, no meds
 
 # Does not exist on this OpenEMR instance at all -- confirmed via
 # `tools.patient_exists`, not merely assumed from the all-zeros shape of

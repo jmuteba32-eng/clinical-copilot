@@ -136,6 +136,11 @@
             "contentMediaType": "application/octet-stream",
             "title": "File",
             "type": "string"
+          },
+          "patient_id": {
+            "default": "",
+            "title": "Patient Id",
+            "type": "string"
           }
         },
         "required": [
@@ -162,7 +167,7 @@
             "type": "string"
           },
           "patient_id": {
-            "description": "The FHIR Patient resource ID \u2014 fixed for the whole session.",
+            "description": "The FHIR Patient resource ID \u00e2\u20ac\u201d fixed for the whole session.",
             "minLength": 1,
             "title": "Patient Id",
             "type": "string"
@@ -279,7 +284,7 @@
         "type": "object"
       },
       "PatientSummary": {
-        "description": "Picker row for GET /patients \u2014 chart identification, not agent clinical output.\n\n``name`` is included so physicians can select the right chart. The agent's\n``get_intake`` tool deliberately omits name (minimum-necessary PHI for Q&A).",
+        "description": "Picker row for GET /patients \u00e2\u20ac\u201d chart identification, not agent clinical output.\n\n``name`` is included so physicians can select the right chart. The agent's\n``get_intake`` tool deliberately omits name (minimum-necessary PHI for Q&A).",
         "properties": {
           "age": {
             "anyOf": [
@@ -569,7 +574,7 @@
   "paths": {
     "/": {
       "get": {
-        "description": "Clinical chat UI \u2014 self-contained HTML, no build step.",
+        "description": "Clinical chat UI \u00e2\u20ac\u201d self-contained HTML, no build step.",
         "operationId": "index__get",
         "responses": {
           "200": {
@@ -770,7 +775,7 @@
     },
     "/login": {
       "post": {
-        "description": "MVP physician login \u2014 accepts configured credentials, returns an in-memory session token.",
+        "description": "MVP physician login \u00e2\u20ac\u201d accepts configured credentials, returns an in-memory session token.",
         "operationId": "login_login_post",
         "requestBody": {
           "content": {
