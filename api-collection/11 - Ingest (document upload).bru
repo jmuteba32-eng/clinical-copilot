@@ -1,0 +1,30 @@
+meta {
+  name: 11 - Ingest (document upload)
+  type: http
+  seq: 11
+}
+post {
+  url: {{base_url}}/ingest
+  body: multipartForm
+  auth: none
+}
+headers {
+  Authorization: Bearer {{token}}
+}
+body:multipart-form {
+  doc_type: intake_form
+  patient_id: {{patient_with_documents}}
+  file: @file()
+}
+docs {
+  Week 2 document upload + extraction + OpenEMR write-back.
+
+  Run 01 - Login first. Then attach a PDF to the `file` field in Bruno
+  (click the field, choose a file). doc_type is intake_form or lab_pdf.
+
+  On success returns: status=ingested, the extracted fields, and
+  openemr_write=written -- the source PDF is persisted to the patient's
+  OpenEMR record (document endpoint; FHIR writes are unavailable on
+  OpenEMR 7.0.3, so the standard REST document API is used, which the
+  spec permits as "OpenEMR records").
+}
