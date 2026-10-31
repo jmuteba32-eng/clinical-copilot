@@ -402,31 +402,43 @@ The audit log is not landing on the mounted Railway volume, so **it does not sur
 
 ---
 
-## 7. Not implemented (required by the PRD)
+## 7. PRD requirements: status
 
-Stated plainly rather than buried.
+Week 1 left several PRD items unbuilt; Week 2 closed most of them. Stated plainly,
+done and not-done together, rather than buried.
 
-1. **FHIR persistence.** Extracted intake facts are **not** written back to OpenEMR as FHIR
-   resources, and the source document is not stored in OpenEMR. The `intake_extractor`
-   worker reads a cached JSON fixture (`agent/pipeline/john_doe_intake.json`) produced by a
-   real extraction run. The loader is a deliberate seam: swapping it for an OpenEMR read
-   changes nothing else in the graph.
-2. **Visual PDF bounding-box overlay.** Required by the citation contract. Not built.
-   `source_page` and `Chunk.index` exist as the anchors it would hang from. Click-to-source
-   snippets **are** implemented in the UI (expandable citation quotes); the box overlay is
-   the missing half.
-3. **Patient scoping on the Week 2 path.** `/respond` does not take a `patient_id` — it
-   answers about the cached intake fixture. The UI's patient selector is therefore
-   **cosmetic in Week 2 mode**. This is a real wart, and it resolves naturally when FHIR
-   persistence lands (item 1).
-4. **Engineering requirements** — OpenAPI 3.0 spec, `/ready` extension for Week 2
-   dependencies (vector index, reranker reachability), per-worker tracing spans, dashboards
-   and alerts, Postman/Bruno collection, backup/RPO/RTO, baseline CPU/memory profiles: not
-   addressed.
-5. **Audit log volume mount.** See §5.2 — the audit log does not survive redeploys.
-6. **Lab-to-chart identity reconciliation.** `extract_lab_report` transcribes whichever patient
-   the report names. Nothing checks that a report's patient matches the session's patient. In a
-   real deployment that check is mandatory before a lab value is shown next to a chart.
+**Implemented in Week 2:**
+
+1. **OpenEMR write-back (Step 2).** Extracted intake facts and the source document are
+   written back to the patient's OpenEMR record. FHIR write scopes are rejected by
+   OpenEMR 7.0.3 (`user/Observation.write` -> `invalid_scope`), so persistence uses the
+   authenticated REST document API, which the PRD explicitly allows ("appropriate FHIR
+   resources **or** OpenEMR records"). Design and constraint: section 14.
+2. **Visual PDF bounding-box overlay (Step 3).** The citation contract's click-to-source
+   overlay is built. Each guideline chunk's coordinates are captured at index time, flow
+   through the citation to the API, and the UI renders the cited passage boxed on the
+   source page. Design: section 15.
+3. **Engineering requirements.** OpenAPI 3.1 spec (`agent/openapi.json`, contract-tested in
+   the gate), Bruno collection (`api-collection/`), `/ready` extended for Week 2
+   dependencies (vector index, reranker, document storage), and backup/RPO/RTO (section 12)
+   are addressed. Per-worker tracing spans and dashboards/alerts remain Phase-2.
+4. **Audit-log pseudonymization (Step 5).** Patient IDs in the access audit trail are
+   pseudonymized to a deterministic one-way token (see the Step 5 note at the end of this
+   doc). The audit log's volume mount is still open (section 5.2): records still do not
+   survive a redeploy.
+
+**Still not implemented:**
+
+5. **Patient scoping on the Week 2 document path.** The write-back (item 1) stores
+   documents per patient, but the *read* path that answers questions is still pinned to one
+   patient: `respond()` takes no `patient_id`, `_INTAKE_LIVE` is a single fixed file, and
+   `has_documents_for()` is hardcoded to the John Doe fixture UUID. Full per-patient
+   document isolation on the answer path is Phase-2. The UI patient selector is therefore
+   still effectively cosmetic for the document path.
+6. **Lab-to-chart identity reconciliation.** `extract_lab_report` transcribes whichever
+   patient the report names. Nothing checks that a report's patient matches the session's
+   patient. In a real deployment that check is mandatory before a lab value is shown next
+   to a chart. (Unchanged from Week 1.)
 
 ---
 
@@ -437,6 +449,8 @@ Stated plainly rather than buried.
 | Unit / contract | Schema validators — required fields, rejection of malformed extractions, citation shape | `agent/gate/test_schema_valid.py`, `test_intake_extraction_schema.py` |
 | Unit / behavior | Scope routing, verified-requires-citation invariant | `agent/gate/test_grounded_answer.py` |
 | Retrieval | Citation completeness; BM25 ranks the right guideline over a stub corpus | `agent/gate/test_citation_present.py` |
+| PHI / audit | Audit trail pseudonymizes patient_id; raw UUID never reaches the file; token is deterministic | `agent/gate/test_audit_scrubs_patient_id.py` |
+| Provenance | Guideline chunks resolve to an in-bounds bounding box; absent text yields no box | `agent/gate/test_bbox_capture.py` |
 | Live behavioral | Prompt injection, cross-patient leakage, invariants, refusals against real OpenEMR + Anthropic | `agent/evals/` (Week 1, pre-deploy only) |
 
 **Every gate test documents the failure mode it guards.** Example: `test_in_scope_without_citations_is_not_verified` guards the exact Week 1 defect the grader flagged.
@@ -769,6 +783,83 @@ held.
    surprise.** The six documented rubric gaps were closed first, which is why they survive
    this. The embedding attempt should have stopped at the first failed deploy rather than
    the fourth.
+
+## 14. OpenEMR write-back (Week 2, Step 2)
+
+**What it does.** After a document is ingested and extracted, the source PDF and a
+companion facts file are written back to the patient's OpenEMR record, so a derived
+fact is traceable to a stored artifact in the EMR, not just to a value in the agent.
+
+**Why REST, not FHIR.** The natural home for a derived observation is a FHIR
+`Observation` resource. OpenEMR 7.0.3 rejects FHIR write scopes at registration /
+token time: requesting `user/Observation.write` yields `invalid_scope`. Rather than
+fake FHIR persistence, the writer uses OpenEMR's authenticated REST document API
+(`/apis/default/api/patient/{pid}/document`), writing to the patient's Medical Record
+category. The PRD allows this explicitly: persistence to "appropriate FHIR resources
+**or** OpenEMR records." This is a platform constraint, documented, not a shortcut.
+
+**Design.** `agent/openemr_writer.py` is a *separate* client from the read-only
+`OpenEMRClient`, on purpose: writes use a distinct OAuth client registered with
+`user/document.write` scope, keeping the read client's narrow, audited, read-only
+contract intact. The writer maps the session's FHIR UUID to the numeric `pid` the
+document endpoint needs via the patient-list API.
+
+**Failure contract: best-effort, non-fatal.** Write-back runs after extraction has
+already succeeded and the answer path is already satisfiable from the extracted JSON.
+A write-back failure (OpenEMR down, scope revoked, pid not found) is logged
+(`openemr_write_failed`) and swallowed -- it never fails the ingest request. The source
+of truth for answering is the extracted facts; the EMR write is a durability and
+traceability bonus, so it must not become a single point of failure for ingestion.
+
+**Verification.** FHIR write being unavailable, write success is confirmed by a direct
+`documents`-table query rather than the REST document *list* endpoint, which returns a
+SQL error on this 7.0.3 build (a known platform bug, not ours). The write path itself
+returns 200 and the file appears under the patient's Medical Record in the UI.
+
+---
+
+## 15. Citation bounding-box overlay (Week 2, Step 3)
+
+**What it does.** The citation contract requires click-to-source provenance. Beyond the
+expandable quote, a physician can click "View in source" on a guideline citation and see
+the cited passage **boxed on the rendered page** of the source PDF -- coordinate-level
+provenance, not just a page number.
+
+**Where coordinates come from.** The guideline PDFs (unlike VLM-extracted intake/lab
+forms) have real text layers, so coordinates are captured deterministically at index
+time, not guessed. When `_load_chunks()` builds a chunk from a page, `_locate_bbox()`
+runs PyMuPDF `search_for()` on that page and stores the resulting rect on the chunk.
+
+**The anchoring subtlety.** Chunk text is whitespace-normalized (`_split_page_text`
+collapses runs of whitespace), so the full chunk string does not `search_for`-match the
+PDF's original layout. The locator anchors on the chunk's first ~8 words -- unique enough
+on a page, short enough to survive the original line breaks -- and takes the union of the
+matched line rects so a wrapped passage is boxed whole. On the real corpus this resolves
+a box for 100% of chunks (528/528). A chunk that straddles a page break and does not
+match yields `bbox=None`; the UI then opens to the page and draws no box. Never a wrong
+box.
+
+**The data path.** `Chunk.bbox` -> `EvidenceHit.citation()` dict -> pipeline `Citation`
+model -> `RespondCitation` (API) -> JSON. Each `**unpack` hop (graph, respond, main)
+only carries the field because every model on the path now declares `page` and `bbox`;
+Pydantic drops undeclared keys, so all three models were extended together.
+
+**Serving and rendering.** A new auth-gated endpoint, `GET /guideline-page?file=&page=`,
+renders one guideline page to PNG at a fixed 150 DPI. It serves **only** the non-PHI
+published guideline corpus -- never patient documents, which would need patient-scoping
+and audit treatment the guideline path does not. `file` is whitelisted against the real
+corpus filenames (not used to build a path), so it cannot traverse out of the guidelines
+directory. The front-end fetches the image with the session Bearer token (an `<img src>`
+cannot send the header, so it fetches to a blob URL), then positions the highlight as
+**percentages** of the page's point dimensions -- derived from the rendered image's
+natural size and the known 150 DPI, so the box tracks however the image is scaled to fit
+the panel and aligns on Letter or A4 alike.
+
+**CI.** `agent/gate/test_bbox_capture.py` fails the build if chunk-to-box resolution
+regresses below 90%, if any box is degenerate or out of bounds, or if absent text yields
+a box instead of `None`.
+
+---
 
 ## Audit trail: patient-ID pseudonymization (Week 2, Step 5)
 
