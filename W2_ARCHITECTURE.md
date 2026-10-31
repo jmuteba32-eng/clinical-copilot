@@ -769,3 +769,33 @@ held.
    surprise.** The six documented rubric gaps were closed first, which is why they survive
    this. The embedding attempt should have stopped at the first failed deploy rather than
    the fourth.
+
+## Audit trail: patient-ID pseudonymization (Week 2, Step 5)
+
+The access audit trail (`agent/audit_trail.py`) records which patient each
+event concerned -- that is the HIPAA purpose of an access log. But the raw
+FHIR Patient UUID is itself an identifier, and an append-only JSONL file of
+raw UUIDs is a PHI store in its own right. These two facts pull against each
+other: drop the patient entirely and the log can no longer answer "who
+accessed this patient's record?"; keep the raw UUID and the audit artifact
+becomes something we would rather not persist to disk.
+
+Resolution: the trail persists a deterministic one-way token
+(`phash_<first 16 hex of SHA-256>`) in place of the raw UUID. Because the
+hash is deterministic, the same patient always maps to the same token, so
+"every access to patient X" stays answerable by grouping on the token -- the
+audit log keeps its purpose. Because it is one-way, the real UUID never
+lands on disk and the token cannot be reversed to it.
+
+The scrub is applied at the single write boundary (`AuditTrail.append_sync`),
+so every audited event -- and the `/audit` read API that surfaces them -- is
+pseudonymized without touching the live request path: scoping, FHIR calls,
+and the `/respond` pipeline all still use the real UUID internally. A gate
+test (`agent/gate/test_audit_scrubs_patient_id.py`) fails the build if a raw
+patient UUID ever reaches the audit file, and asserts the token is
+deterministic, so the "groupable" property cannot silently regress.
+
+Scope note: logs and traces are covered separately by the
+`no_phi_in_logs` gate (worker-handoff logs carry only routing metadata and a
+correlation id; free-text questions are recorded by length only). This note
+covers the access audit artifact specifically.

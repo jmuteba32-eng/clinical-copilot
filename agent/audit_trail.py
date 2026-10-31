@@ -1,6 +1,6 @@
-"""Append-only access audit log for the Clinical Co-Pilot HTTP layer.
+﻿"""Append-only access audit log for the Clinical Co-Pilot HTTP layer.
 
-Records WHO accessed WHICH patient (opaque UUID) and WHEN — never chart
+Records WHO accessed WHICH patient (opaque UUID) and WHEN â€” never chart
 contents, questions, answers, or other clinical data. Mirrors the AUDIT.md
 finding that OpenEMR persisted full API response bodies; this store is
 metadata-only by design.
@@ -14,6 +14,7 @@ is root-owned. Structured JSON logs still record ``audit_log_path_fallback``.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import tempfile
@@ -42,8 +43,23 @@ AuditEventType = Literal[
 ]
 
 
+def scrub_patient_id(patient_id: str | None) -> str | None:
+    """Pseudonymize a FHIR Patient UUID for the persisted audit trail.
+
+    A HIPAA access log must record WHICH patient was accessed, but the raw
+    FHIR UUID is itself an identifier we would rather not persist to a flat
+    file. SHA-256 truncated to 16 hex chars is deterministic -- the same
+    patient always maps to the same token -- so "every access to patient X"
+    is still answerable by grouping on the token, while the real UUID never
+    lands on disk. One-way: the token cannot be reversed to the UUID.
+    """
+    if not patient_id:
+        return None
+    digest = hashlib.sha256(patient_id.encode("utf-8")).hexdigest()[:16]
+    return f"phash_{digest}"
+
 class AuditRecord(BaseModel):
-    """One immutable access event — no PHI fields."""
+    """One immutable access event â€” no PHI fields."""
 
     timestamp: str = Field(..., description="UTC ISO-8601 time the event was recorded.")
     username: str = Field(..., description="Authenticated UI user, or 'unauthenticated' for API-only calls.")
@@ -70,7 +86,7 @@ class AuditTrail:
 
     @classmethod
     def from_env(cls) -> AuditTrail:
-        """Build an audit trail, never raising — falls back if the preferred path is not writable."""
+        """Build an audit trail, never raising â€” falls back if the preferred path is not writable."""
         raw = os.environ.get(_ENV_AUDIT_LOG_PATH, _DEFAULT_RELATIVE_PATH).strip()
         preferred = _resolve_audit_log_path(raw)
         path, using_preferred = _resolve_writable_path(preferred)
@@ -116,7 +132,7 @@ class AuditTrail:
             timestamp=datetime.now(timezone.utc).isoformat(),
             username=username,
             event_type=event_type,
-            patient_id=patient_id,
+            patient_id=scrub_patient_id(patient_id),
             correlation_id=correlation_id,
             outcome=outcome,
             denial_reason=denial_reason,
@@ -252,4 +268,5 @@ def _resolve_writable_path(preferred: Path) -> tuple[Path | None, bool]:
         if _probe_writable(candidate):
             return candidate, index == 0
     return None, False
+
 

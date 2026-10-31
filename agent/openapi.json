@@ -55,7 +55,7 @@
         "type": "object"
       },
       "AuditRecord": {
-        "description": "One immutable access event \u2014 no PHI fields.",
+        "description": "One immutable access event \u00e2\u20ac\u201d no PHI fields.",
         "properties": {
           "correlation_id": {
             "description": "Request correlation ID for joining to server logs.",
