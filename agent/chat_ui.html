@@ -865,7 +865,7 @@
       function patientSecondary(p) {
         const age = p.age != null ? p.age + "y" : "age ?";
         const sex = p.sex ? p.sex.charAt(0).toUpperCase() + p.sex.slice(1) : "sex ?";
-        return age + " Â· " + sex;
+        return age + " \u00b7 " + sex;
       }
 
       function scrollMessages() {
@@ -995,7 +995,7 @@
           '<span class="msg-label">Co-Pilot</span>' +
           '<div class="bubble agent">' + formatAnswerHtml(text) + "</div>" +
           '<span class="verify-badge ' + badgeClass + '">' +
-          '<span class="verify-dot"></span>' + badgeLabel + " Â· " + sources + " source" + (sources === 1 ? "" : "s") +
+          '<span class="verify-dot"></span>' + badgeLabel + " \u00b7 " + sources + " source" + (sources === 1 ? "" : "s") +
           "</span>";
         $("messages").appendChild(row);
         scrollMessages();
@@ -1265,7 +1265,7 @@
         state.patientId = p.id;
         state.patientLabel = patientName(p);
         $("hdr-physician").textContent = state.username;
-        $("hdr-patient").textContent = patientName(p) + " Â· " + patientSecondary(p);
+        $("hdr-patient").textContent = patientName(p) + " \u00b7 " + patientSecondary(p);
         $("message-input").disabled = false;
         $("send-btn").disabled = false;
         showView("chat");
