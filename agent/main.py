@@ -527,6 +527,8 @@ class RespondCitation(BaseModel):
     page_or_section: str | None = None
     field_or_chunk_id: str | None = None
     quote_or_value: str | None = None
+    page: int | None = None  # numeric page for the overlay; page_or_section stays the human string
+    bbox: list[float] | None = None  # (x0,y0,x1,y1) in PDF points; None -> open to page, no box
 
 
 class RespondResponse(BaseModel):
@@ -659,6 +661,45 @@ async def get_audit(request: Request) -> list[AuditRecord] | JSONResponse:
         return JSONResponse(status_code=401, content={"error": "Sign in required."})
     trail: AuditTrail = request.app.state.audit_trail
     return await trail.read_records()
+
+
+@app.get("/guideline-page")
+async def guideline_page(request: Request, file: str, page: int) -> Response:
+    """Render one page of a guideline PDF to PNG for the citation overlay.
+
+    Serves ONLY the non-PHI published guideline corpus (agent/rag/guidelines),
+    never patient documents -- a patient-document image endpoint would need the
+    patient-scoping and audit treatment the guideline path does not. Requires a
+    UI session. `file` is whitelisted against the real corpus filenames rather
+    than used to build a path, so it cannot traverse out of the guidelines dir.
+
+    Rendered at a FIXED 150 DPI (the same DPI the extractor uses), so the
+    front-end has one known PDF-point -> pixel scale (150/72) to place the box.
+    """
+    if _ui_username_from_request(request) is None:
+        return JSONResponse(status_code=401, content={"error": "Sign in required."})
+
+    from agent.rag.retrieve import _GUIDELINES_DIR
+
+    allowed = {p.name for p in _GUIDELINES_DIR.glob("*.pdf")}
+    if file not in allowed:
+        return JSONResponse(status_code=404, content={"error": "Unknown guideline document."})
+    if page < 1:
+        return JSONResponse(status_code=422, content={"error": "page must be >= 1."})
+
+    import fitz  # pymupdf
+
+    pdf_path = _GUIDELINES_DIR / file
+    doc = fitz.open(pdf_path)
+    try:
+        if page > doc.page_count:
+            return JSONResponse(status_code=404, content={"error": "page out of range."})
+        png = doc.load_page(page - 1).get_pixmap(dpi=150).tobytes("png")
+    finally:
+        doc.close()
+
+    # Non-PHI static corpus: safe to let the browser cache page images.
+    return Response(content=png, media_type="image/png", headers={"Cache-Control": "private, max-age=3600"})
 
 
 @app.get("/baa-status")

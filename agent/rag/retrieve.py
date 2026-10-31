@@ -95,6 +95,7 @@ class Chunk:
     page: int  # 1-based
     text: str
     index: int = 0  # nth chunk within this page; disambiguates citation ids
+    bbox: tuple[float, float, float, float] | None = None  # (x0,y0,x1,y1) PDF points; None if not locatable
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,8 @@ class EvidenceHit:
             "page_or_section": f"page {self.chunk.page}",
             "field_or_chunk_id": f"{self.chunk.guideline_file}#p{self.chunk.page}c{self.chunk.index}",
             "quote_or_value": self.chunk.text[:300],
+            "page": self.chunk.page,
+            "bbox": list(self.chunk.bbox) if self.chunk.bbox else None,
         }
 
 
@@ -147,20 +150,53 @@ def _split_page_text(text: str) -> list[str]:
     return [c for c in merged if len(c) >= 40]
 
 
+def _locate_bbox(page, chunk_text: str) -> tuple[float, float, float, float] | None:
+    """Find where a chunk sits on its page, as a PDF-point rect (x0,y0,x1,y1).
+
+    _split_page_text normalizes whitespace, so the full chunk string will not
+    search_for-match the PDF's original text layout. We anchor on the chunk's
+    first ~8 words -- enough to be unique on a page, short enough to survive the
+    original line breaks search_for matches against. The returned rect is the
+    UNION of every line the anchor spans, so a wrapped passage boxes whole, not
+    just its first line. Returns None on no match (e.g. a chunk that straddles a
+    page break): the caller treats None as "open to the page, draw no box" --
+    never a wrong box.
+    """
+    words = chunk_text.split()
+    if not words:
+        return None
+    anchor = " ".join(words[:8])
+    try:
+        rects = page.search_for(anchor)
+    except Exception:
+        return None
+    if not rects:
+        # Retry on a shorter anchor: some chunks start mid-hyphenation.
+        rects = page.search_for(" ".join(words[:4])) if len(words) >= 4 else []
+    if not rects:
+        return None
+    x0 = min(r.x0 for r in rects)
+    y0 = min(r.y0 for r in rects)
+    x1 = max(r.x1 for r in rects)
+    y1 = max(r.y1 for r in rects)
+    return (float(x0), float(y0), float(x1), float(y1))
+
 def _load_chunks() -> list[Chunk]:
     """Paragraph-level chunks from each guideline PDF, tagged with their page."""
-    import fitz  # pymupdf — lazy: gate imports only need Chunk/EvidenceHit/_tokenize
+    import fitz  # pymupdf â€” lazy: gate imports only need Chunk/EvidenceHit/_tokenize
 
     chunks: list[Chunk] = []
     for pdf in sorted(_GUIDELINES_DIR.glob("*.pdf")):
         doc = fitz.open(pdf)
         try:
             for i in range(doc.page_count):
-                text = doc.load_page(i).get_text().strip()
+                page_obj = doc.load_page(i)
+                text = page_obj.get_text().strip()
                 if not text:
                     continue
                 for j, piece in enumerate(_split_page_text(text)):
-                    chunks.append(Chunk(guideline_file=pdf.name, page=i + 1, text=piece, index=j))
+                    bbox = _locate_bbox(page_obj, piece)
+                    chunks.append(Chunk(guideline_file=pdf.name, page=i + 1, text=piece, index=j, bbox=bbox))
         finally:
             doc.close()
     return chunks
@@ -283,3 +319,4 @@ if __name__ == "__main__":
             sys.stdout.encoding or "utf-8"
         )
         print(f"[{hit.score:.3f}] {c.guideline_file} p{c.page}: {snippet}...")
+

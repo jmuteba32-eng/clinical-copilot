@@ -332,6 +332,20 @@
       },
       "RespondCitation": {
         "properties": {
+          "bbox": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "number"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bbox"
+          },
           "field_or_chunk_id": {
             "anyOf": [
               {
@@ -342,6 +356,17 @@
               }
             ],
             "title": "Field Or Chunk Id"
+          },
+          "page": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Page"
           },
           "page_or_section": {
             "anyOf": [
@@ -711,6 +736,53 @@
           }
         },
         "summary": "Chat"
+      }
+    },
+    "/guideline-page": {
+      "get": {
+        "description": "Render one page of a guideline PDF to PNG for the citation overlay.\n\nServes ONLY the non-PHI published guideline corpus (agent/rag/guidelines),\nnever patient documents -- a patient-document image endpoint would need the\npatient-scoping and audit treatment the guideline path does not. Requires a\nUI session. `file` is whitelisted against the real corpus filenames rather\nthan used to build a path, so it cannot traverse out of the guidelines dir.\n\nRendered at a FIXED 150 DPI (the same DPI the extractor uses), so the\nfront-end has one known PDF-point -> pixel scale (150/72) to place the box.",
+        "operationId": "guideline_page_guideline_page_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "file",
+            "required": true,
+            "schema": {
+              "title": "File",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "page",
+            "required": true,
+            "schema": {
+              "title": "Page",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Guideline Page"
       }
     },
     "/health": {

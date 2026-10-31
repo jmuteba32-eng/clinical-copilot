@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
@@ -930,11 +930,22 @@
         if (cites.length) {
           citeHtml = '<div class="w2-cites">';
           cites.forEach(function (c, i) {
+            var viewBtn = "";
+            if (c.page) {
+              // data-* carry everything openSource needs; bbox is JSON so a null stays null.
+              viewBtn =
+                '<button type="button" class="w2-view-source" ' +
+                'data-file="' + escapeHtml(c.source_id || "") + '" ' +
+                'data-page="' + String(c.page) + '" ' +
+                "data-bbox='" + JSON.stringify(c.bbox || null) + "'>" +
+                "View in source" + "</button>";
+            }
             citeHtml +=
               '<details class="w2-cite">' +
               "<summary>[" + (i + 1) + "] " + escapeHtml(c.source_id || "") +
               " \u2014 " + escapeHtml(c.page_or_section || "") + "</summary>" +
               "<p>" + escapeHtml(c.quote_or_value || "") + "</p>" +
+              viewBtn +
               "</details>";
           });
           citeHtml += "</div>";
@@ -1355,6 +1366,106 @@
         this.style.height = Math.min(this.scrollHeight, 140) + "px";
       });
       loadBaaStatus();
+
+      // ---- Week 2 Step 3: click-to-source PDF overlay with bounding box ----
+      (function initSourceOverlay() {
+        var style = document.createElement("style");
+        style.textContent =
+          ".w2-view-source{margin:4px 0 2px 12px;font-size:11px;padding:2px 8px;border:1px solid rgba(0,0,0,0.2);" +
+          "border-radius:10px;background:#fff;color:#0b5ed7;cursor:pointer;}" +
+          ".w2-view-source:hover{background:#eef4ff;}" +
+          ".src-overlay{position:fixed;inset:0;z-index:100001;background:rgba(0,0,0,0.55);display:none;" +
+          "align-items:center;justify-content:center;padding:16px;}" +
+          ".src-overlay.open{display:flex;}" +
+          ".src-stage{position:relative;background:#fff;border-radius:8px;max-width:95%;max-height:92%;" +
+          "overflow:auto;box-shadow:0 8px 30px rgba(0,0,0,0.4);}" +
+          ".src-head{display:flex;justify-content:space-between;align-items:center;padding:8px 12px;" +
+          "font:600 13px sans-serif;border-bottom:1px solid #eee;position:sticky;top:0;background:#fff;}" +
+          ".src-close{border:none;background:none;font-size:20px;line-height:1;cursor:pointer;color:#555;}" +
+          ".src-canvas{position:relative;display:inline-block;}" +
+          ".src-canvas img{display:block;max-width:100%;height:auto;}" +
+          ".src-box{position:absolute;background:rgba(255,214,0,0.28);border:2px solid #f5b100;" +
+          "border-radius:2px;pointer-events:none;}" +
+          ".src-note{padding:6px 12px;font:12px sans-serif;color:#555;}";
+        document.head.appendChild(style);
+
+        var overlay = document.createElement("div");
+        overlay.className = "src-overlay";
+        overlay.innerHTML =
+          '<div class="src-stage">' +
+          '<div class="src-head"><span class="src-title">Source</span>' +
+          '<button type="button" class="src-close" title="Close">&times;</button></div>' +
+          '<div class="src-canvas"><img alt="Guideline source page" /><div class="src-box" style="display:none;"></div></div>' +
+          '<div class="src-note"></div>' +
+          "</div>";
+        document.body.appendChild(overlay);
+
+        var imgEl = overlay.querySelector("img");
+        var boxEl = overlay.querySelector(".src-box");
+        var titleEl = overlay.querySelector(".src-title");
+        var noteEl = overlay.querySelector(".src-note");
+        var currentBlobUrl = null;
+        var _DPI = 150, _PT = 72;  // endpoint renders at 150 DPI; PDF user space is 72 pt/in
+
+        function closeOverlay() {
+          overlay.classList.remove("open");
+          if (currentBlobUrl) { URL.revokeObjectURL(currentBlobUrl); currentBlobUrl = null; }
+          imgEl.removeAttribute("src");
+          boxEl.style.display = "none";
+        }
+        overlay.querySelector(".src-close").addEventListener("click", closeOverlay);
+        overlay.addEventListener("click", function (e) { if (e.target === overlay) closeOverlay(); });
+        document.addEventListener("keydown", function (e) { if (e.key === "Escape") closeOverlay(); });
+
+        function placeBox(bbox) {
+          // Natural image px are at 150 DPI; convert back to PDF points to get the
+          // page's point dimensions, then position the box as PERCENTAGES so it
+          // tracks however the <img> is scaled to fit the panel. Page size comes
+          // from the rendered image, not a hardcoded Letter -- A4 aligns too.
+          if (!bbox) { boxEl.style.display = "none"; return; }
+          var pageWpt = imgEl.naturalWidth / (_DPI / _PT);
+          var pageHpt = imgEl.naturalHeight / (_DPI / _PT);
+          if (!pageWpt || !pageHpt) { boxEl.style.display = "none"; return; }
+          var x0 = bbox[0], y0 = bbox[1], x1 = bbox[2], y1 = bbox[3];
+          boxEl.style.left = (x0 / pageWpt * 100) + "%";
+          boxEl.style.top = (y0 / pageHpt * 100) + "%";
+          boxEl.style.width = ((x1 - x0) / pageWpt * 100) + "%";
+          boxEl.style.height = ((y1 - y0) / pageHpt * 100) + "%";
+          boxEl.style.display = "block";
+        }
+
+        async function openSource(file, page, bbox) {
+          titleEl.textContent = file + " \u2014 page " + page;
+          noteEl.textContent = bbox ? "Highlight shows the cited passage." : "Cited text could not be boxed; showing the page.";
+          boxEl.style.display = "none";
+          overlay.classList.add("open");
+          try {
+            var headers = {};
+            if (state.token) headers["Authorization"] = "Bearer " + state.token;
+            var url = "/guideline-page?file=" + encodeURIComponent(file) + "&page=" + encodeURIComponent(page);
+            var res = await fetch(url, { headers: headers });
+            if (!res.ok) { noteEl.textContent = "Could not load source page (" + res.status + ")."; return; }
+            var blob = await res.blob();
+            if (currentBlobUrl) URL.revokeObjectURL(currentBlobUrl);
+            currentBlobUrl = URL.createObjectURL(blob);
+            imgEl.onload = function () { placeBox(bbox); };
+            imgEl.src = currentBlobUrl;
+          } catch (err) {
+            noteEl.textContent = "Could not load source page.";
+          }
+        }
+
+        // Delegated: citations are injected after load, so a direct listener misses them.
+        document.addEventListener("click", function (e) {
+          var btn = e.target.closest ? e.target.closest(".w2-view-source") : null;
+          if (!btn) return;
+          var file = btn.getAttribute("data-file");
+          var page = parseInt(btn.getAttribute("data-page"), 10);
+          var bbox = null;
+          try { bbox = JSON.parse(btn.getAttribute("data-bbox")); } catch (err) { bbox = null; }
+          if (file && page) openSource(file, page, bbox);
+        });
+      })();
     })();
   </script>
 </body>

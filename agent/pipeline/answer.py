@@ -65,6 +65,8 @@ class Citation(BaseModel):
     page_or_section: Optional[str] = None
     field_or_chunk_id: Optional[str] = None
     quote_or_value: Optional[str] = None
+    page: Optional[int] = None  # numeric page for the PDF overlay
+    bbox: Optional[list[float]] = None  # (x0,y0,x1,y1) PDF points; None -> page-level, no box
 
 
 class GroundedAnswer(BaseModel):
